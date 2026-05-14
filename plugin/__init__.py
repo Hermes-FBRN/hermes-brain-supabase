@@ -1,0 +1,369 @@
+"""Supabase Mem0 memory provider for Hermes.
+
+Uses Mem0 OSS (``Memory.from_config``) with the Supabase/pgvector vector store.
+Installed as a user memory plugin under ``$HERMES_HOME/plugins/supabase_mem0``
+so the plugin source survives Railway redeploys when HERMES_HOME is on /data.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+import sys
+import threading
+import time
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+from agent.memory_provider import MemoryProvider
+from tools.registry import tool_error
+
+logger = logging.getLogger(__name__)
+
+_BRAIN_SEARCH_SCHEMA = {
+    "name": "brain_search",
+    "description": "Search the Supabase-backed brain by semantic meaning. Use for user preferences, project facts, decisions, and durable knowledge.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string", "description": "What to search for."},
+            "top_k": {"type": "integer", "description": "Maximum results, default 5, max 20."},
+            "category": {"type": "string", "description": "Optional category metadata filter."},
+        },
+        "required": ["query"],
+    },
+}
+
+_BRAIN_REMEMBER_SCHEMA = {
+    "name": "brain_remember",
+    "description": "Store an explicit durable fact in the Supabase-backed brain. Use only for stable facts/preferences/corrections/decisions, not temporary task progress.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "memory": {"type": "string", "description": "The durable fact to store."},
+            "category": {"type": "string", "description": "Optional category, e.g. preference, project, infra, workflow."},
+            "importance": {"type": "integer", "description": "Optional importance 1-10."},
+        },
+        "required": ["memory"],
+    },
+}
+
+_BRAIN_PROFILE_SCHEMA = {
+    "name": "brain_profile",
+    "description": "Return a broader set of memories for the active user from the Supabase-backed brain.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "top_k": {"type": "integer", "description": "Maximum memories, default 20, max 50."},
+        },
+        "required": [],
+    },
+}
+
+
+def _hermes_home() -> Path:
+    from hermes_constants import get_hermes_home
+
+    return get_hermes_home()
+
+
+def _load_env_file() -> None:
+    """Best-effort .env loader for subprocess tests and plugin setup.
+
+    Hermes normally loads .env for the gateway/CLI. This keeps direct provider
+    tests working too. Values already in os.environ win.
+    """
+    env_path = _hermes_home() / ".env"
+    if not env_path.exists():
+        return
+    for raw in env_path.read_text(errors="ignore").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        os.environ.setdefault(key, value)
+
+
+def _load_json_config() -> Dict[str, Any]:
+    path = _hermes_home() / "supabase_mem0.json"
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _add_vendor_to_path() -> None:
+    """Make persistent vendored deps available after Railway redeploys.
+
+    We append, not prepend, so image/global Hermes packages remain preferred.
+    If the redeployed image lacks mem0/vecs, Python can still import the copy
+    installed in /data.
+    """
+    vendor = _hermes_home() / "vendor" / "supabase_mem0"
+    if vendor.is_dir():
+        s = str(vendor)
+        if s not in sys.path:
+            sys.path.append(s)
+
+
+class SupabaseMem0MemoryProvider(MemoryProvider):
+    """Mem0 OSS + Supabase pgvector provider."""
+
+    def __init__(self) -> None:
+        self._memory = None
+        self._client_lock = threading.Lock()
+        self._prefetch_thread = None
+        self._prefetch_result = ""
+        self._prefetch_lock = threading.Lock()
+        self._sync_thread = None
+        self._db_url = ""
+        self._collection = "hermes_brain"
+        self._user_id = "hermes-user"
+        self._agent_id = "hermes"
+        self._auto_sync = False
+        self._initialized = False
+
+    @property
+    def name(self) -> str:
+        return "supabase_mem0"
+
+    def is_available(self) -> bool:
+        _load_env_file()
+        _add_vendor_to_path()
+        db_url = os.environ.get("SUPABASE_BRAIN_DB_URL", "")
+        openai_key = os.environ.get("OPENAI_API_KEY", "")
+        if not (db_url and openai_key):
+            return False
+        try:
+            import mem0  # noqa: F401
+            import vecs  # noqa: F401
+            return True
+        except Exception:
+            return False
+
+    def get_config_schema(self):
+        return [
+            {"key": "db_url", "description": "Supabase Postgres connection string", "secret": True, "required": True, "env_var": "SUPABASE_BRAIN_DB_URL"},
+            {"key": "openai_api_key", "description": "OpenAI key used by Mem0 for extraction/embeddings", "secret": True, "required": True, "env_var": "OPENAI_API_KEY"},
+            {"key": "collection", "description": "Supabase/vecs collection name", "default": "hermes_brain"},
+            {"key": "auto_sync", "description": "Automatically sync every completed turn", "default": "false", "choices": ["true", "false"]},
+        ]
+
+    def save_config(self, values: Dict[str, Any], hermes_home: str) -> None:
+        path = Path(hermes_home) / "supabase_mem0.json"
+        existing: Dict[str, Any] = {}
+        if path.exists():
+            try:
+                existing = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                existing = {}
+        existing.update(values)
+        path.write_text(json.dumps(existing, indent=2), encoding="utf-8")
+
+    def initialize(self, session_id: str, **kwargs) -> None:
+        _load_env_file()
+        _add_vendor_to_path()
+        cfg = _load_json_config()
+        self._db_url = os.environ.get("SUPABASE_BRAIN_DB_URL", "")
+        self._collection = os.environ.get("SUPABASE_BRAIN_COLLECTION") or cfg.get("collection") or "hermes_brain"
+        self._user_id = kwargs.get("user_id") or os.environ.get("SUPABASE_BRAIN_USER_ID") or cfg.get("user_id") or "hermes-user"
+        self._agent_id = os.environ.get("SUPABASE_BRAIN_AGENT_ID") or cfg.get("agent_id") or "hermes"
+        raw_auto = os.environ.get("SUPABASE_BRAIN_AUTO_SYNC", str(cfg.get("auto_sync", "false")))
+        self._auto_sync = str(raw_auto).strip().lower() in {"1", "true", "yes", "on"}
+        self._initialized = True
+        # Lazy client creation; avoids DB/LLM setup during prompt construction.
+
+    def _get_memory(self):
+        with self._client_lock:
+            if self._memory is not None:
+                return self._memory
+            if not self._db_url:
+                raise RuntimeError("SUPABASE_BRAIN_DB_URL is not configured")
+            try:
+                from mem0 import Memory
+            except ImportError as e:
+                raise RuntimeError(
+                    "mem0ai/vecs not installed. Expected global install or persistent vendor at "
+                    f"{_hermes_home() / 'vendor' / 'supabase_mem0'}"
+                ) from e
+            config = {
+                "vector_store": {
+                    "provider": "supabase",
+                    "config": {
+                        "connection_string": self._db_url,
+                        "collection_name": self._collection,
+                        "embedding_model_dims": 1536,
+                        "index_method": "hnsw",
+                        "index_measure": "cosine_distance",
+                    },
+                }
+            }
+            self._memory = Memory.from_config(config)
+            return self._memory
+
+    def _filters(self, extra: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        filters: Dict[str, Any] = {"user_id": self._user_id}
+        if extra:
+            filters.update({k: v for k, v in extra.items() if v is not None and v != ""})
+        return filters
+
+    @staticmethod
+    def _results(response: Any) -> List[Dict[str, Any]]:
+        if isinstance(response, dict):
+            r = response.get("results", [])
+            return r if isinstance(r, list) else []
+        if isinstance(response, list):
+            return response
+        return []
+
+    def system_prompt_block(self) -> str:
+        return (
+            "# Supabase Brain Memory\n"
+            f"Active provider: supabase_mem0. User scope: {self._user_id}. Collection: {self._collection}.\n"
+            "Use brain_search for recall and brain_remember only for explicit durable facts. "
+            "Do not store temporary progress or secrets."
+        )
+
+    def queue_prefetch(self, query: str, *, session_id: str = "") -> None:
+        def _run() -> None:
+            try:
+                mem = self._get_memory()
+                response = mem.search(query=query, filters=self._filters(), top_k=5)
+                results = self._results(response)
+                lines = []
+                for r in results:
+                    text = r.get("memory") or r.get("text") or ""
+                    if text:
+                        lines.append(f"- {text}")
+                with self._prefetch_lock:
+                    self._prefetch_result = "\n".join(lines)
+            except Exception as e:
+                logger.debug("supabase_mem0 prefetch failed: %s", e)
+
+        if self._prefetch_thread and self._prefetch_thread.is_alive():
+            return
+        self._prefetch_thread = threading.Thread(target=_run, daemon=True, name="supabase-mem0-prefetch")
+        self._prefetch_thread.start()
+
+    def prefetch(self, query: str, *, session_id: str = "") -> str:
+        if self._prefetch_thread and self._prefetch_thread.is_alive():
+            self._prefetch_thread.join(timeout=2.5)
+        with self._prefetch_lock:
+            result = self._prefetch_result
+            self._prefetch_result = ""
+        return f"## Supabase Brain Recall\n{result}" if result else ""
+
+    def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "") -> None:
+        if not self._auto_sync:
+            return
+
+        def _sync() -> None:
+            try:
+                mem = self._get_memory()
+                mem.add(
+                    [
+                        {"role": "user", "content": user_content},
+                        {"role": "assistant", "content": assistant_content},
+                    ],
+                    user_id=self._user_id,
+                    agent_id=self._agent_id,
+                    metadata={"source": "hermes_auto_sync", "session_id": session_id},
+                )
+            except Exception as e:
+                logger.warning("supabase_mem0 sync failed: %s", e)
+
+        if self._sync_thread and self._sync_thread.is_alive():
+            self._sync_thread.join(timeout=3)
+        self._sync_thread = threading.Thread(target=_sync, daemon=True, name="supabase-mem0-sync")
+        self._sync_thread.start()
+
+    def get_tool_schemas(self) -> List[Dict[str, Any]]:
+        return [_BRAIN_SEARCH_SCHEMA, _BRAIN_REMEMBER_SCHEMA, _BRAIN_PROFILE_SCHEMA]
+
+    def handle_tool_call(self, tool_name: str, args: Dict[str, Any], **kwargs) -> str:
+        try:
+            mem = self._get_memory()
+        except Exception as e:
+            return tool_error(str(e))
+
+        if tool_name == "brain_search":
+            query = str(args.get("query") or "").strip()
+            if not query:
+                return tool_error("Missing required parameter: query")
+            top_k = max(1, min(int(args.get("top_k") or 5), 20))
+            extra = {"category": args.get("category")} if args.get("category") else None
+            try:
+                response = mem.search(query=query, filters=self._filters(extra), top_k=top_k)
+                items = []
+                for r in self._results(response):
+                    items.append({
+                        "memory": r.get("memory") or r.get("text") or "",
+                        "score": r.get("score"),
+                        "metadata": r.get("metadata") or {},
+                    })
+                return json.dumps({"results": items, "count": len(items)})
+            except Exception as e:
+                return tool_error(f"brain_search failed: {e}")
+
+        if tool_name == "brain_remember":
+            text = str(args.get("memory") or "").strip()
+            if not text:
+                return tool_error("Missing required parameter: memory")
+            metadata = {
+                "source": "hermes_brain_remember",
+                "category": args.get("category") or "memory",
+                "importance": args.get("importance"),
+                "agent_id": self._agent_id,
+                "stored_at": int(time.time()),
+            }
+            try:
+                mem.add(
+                    [{"role": "user", "content": text}],
+                    user_id=self._user_id,
+                    agent_id=self._agent_id,
+                    metadata=metadata,
+                    infer=False,
+                )
+                return json.dumps({"result": "stored", "category": metadata["category"]})
+            except TypeError:
+                # Older/local Mem0 builds may not accept infer=False.
+                try:
+                    mem.add(
+                        [{"role": "user", "content": text}],
+                        user_id=self._user_id,
+                        agent_id=self._agent_id,
+                        metadata=metadata,
+                    )
+                    return json.dumps({"result": "stored", "category": metadata["category"]})
+                except Exception as e:
+                    return tool_error(f"brain_remember failed: {e}")
+            except Exception as e:
+                return tool_error(f"brain_remember failed: {e}")
+
+        if tool_name == "brain_profile":
+            top_k = max(1, min(int(args.get("top_k") or 20), 50))
+            try:
+                # Broad neutral query works across Mem0 OSS without relying on get_all availability.
+                response = mem.search(query="user preferences projects decisions stable facts profile", filters=self._filters(), top_k=top_k)
+                items = [{"memory": r.get("memory") or r.get("text") or "", "score": r.get("score")} for r in self._results(response)]
+                return json.dumps({"results": items, "count": len(items)})
+            except Exception as e:
+                return tool_error(f"brain_profile failed: {e}")
+
+        return tool_error(f"Unknown tool: {tool_name}")
+
+    def shutdown(self) -> None:
+        for t in (self._prefetch_thread, self._sync_thread):
+            if t and t.is_alive():
+                t.join(timeout=3)
+        with self._client_lock:
+            self._memory = None
+
+
+def register(ctx) -> None:
+    ctx.register_memory_provider(SupabaseMem0MemoryProvider())

@@ -1,0 +1,369 @@
+#!/usr/bin/env python3
+"""Safe administrative MCP server for the Supabase-backed Hermes brain.
+
+Design goals:
+- no raw SQL tool exposed to the model
+- soft archive instead of hard delete
+- metadata/version edits audited in public.hermes_memory_history when available
+- semantic search/write through Mem0 when possible, direct Postgres for admin inspection
+"""
+from __future__ import annotations
+
+import json
+import os
+import sys
+import time
+import traceback
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+# Persistent vendored deps for Railway-style deployments.
+HERMES_HOME = Path(os.environ.get("HERMES_HOME", "/data/.hermes")).expanduser()
+VENDOR = HERMES_HOME / "vendor" / "supabase_mem0"
+if VENDOR.exists() and str(VENDOR) not in sys.path:
+    sys.path.insert(0, str(VENDOR))
+
+from mcp.server.fastmcp import FastMCP
+import psycopg
+from psycopg.rows import dict_row
+
+try:
+    from mem0 import Memory
+except Exception:  # pragma: no cover - health tool reports it
+    Memory = None  # type: ignore
+
+mcp = FastMCP("brain-manager")
+
+
+def _load_env_file() -> None:
+    """Load /data/.hermes/.env without printing or leaking values."""
+    env_path = HERMES_HOME / ".env"
+    if not env_path.exists():
+        return
+    for raw in env_path.read_text().splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, val = line.split("=", 1)
+        key = key.strip()
+        val = val.strip().strip('"').strip("'")
+        os.environ.setdefault(key, val)
+
+
+_load_env_file()
+
+DB_URL = os.environ.get("SUPABASE_BRAIN_DB_URL")
+COLLECTION = os.environ.get("SUPABASE_BRAIN_COLLECTION") or "hermes_brain"
+BRAIN_SCHEMA = os.environ.get("SUPABASE_BRAIN_SCHEMA") or "vecs"
+BRAIN_TABLE = f'{BRAIN_SCHEMA}."{COLLECTION}"'
+DEFAULT_USER_ID = os.environ.get("SUPABASE_BRAIN_USER_ID") or "hermes-user"
+DEFAULT_AGENT_ID = os.environ.get("SUPABASE_BRAIN_AGENT_ID") or "hermes"
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _require_db_url() -> str:
+    if not DB_URL:
+        raise RuntimeError("SUPABASE_BRAIN_DB_URL is not configured")
+    return DB_URL
+
+
+def _connect():
+    return psycopg.connect(_require_db_url(), row_factory=dict_row)
+
+
+def _memory_engine():
+    if Memory is None:
+        raise RuntimeError("mem0 is not importable")
+    config = {
+        "vector_store": {
+            "provider": "supabase",
+            "config": {
+                "connection_string": _require_db_url(),
+                "collection_name": COLLECTION,
+                "embedding_model_dims": 1536,
+                "index_method": "hnsw",
+                "index_measure": "cosine_distance",
+            },
+        }
+    }
+    return Memory.from_config(config)
+
+
+def _sanitize_row(row: Dict[str, Any], include_vector: bool = False) -> Dict[str, Any]:
+    md = row.get("metadata") or {}
+    out = {
+        "id": row.get("id"),
+        "data": md.get("data"),
+        "category": md.get("category"),
+        "importance": md.get("importance"),
+        "user_id": md.get("user_id"),
+        "agent_id": md.get("agent_id"),
+        "source": md.get("source"),
+        "created_at": md.get("created_at"),
+        "updated_at": md.get("updated_at"),
+        "archived": bool(md.get("archived") or md.get("deleted") or md.get("archived_at")),
+        "metadata": md,
+    }
+    if include_vector and "vec" in row:
+        out["vec"] = str(row["vec"])
+    return out
+
+
+def _exec_history(cur, memory_id: str, prev_metadata: Dict[str, Any], new_metadata: Dict[str, Any], actor: str) -> None:
+    try:
+        cur.execute(
+            """
+            insert into public.hermes_memory_history(memory_id, prev_metadata, new_metadata, actor)
+            values (%s, %s::jsonb, %s::jsonb, %s)
+            """,
+            (memory_id, json.dumps(prev_metadata), json.dumps(new_metadata), actor),
+        )
+    except Exception:
+        # History table is nice-to-have; do not fail the admin update if absent/mismatched.
+        pass
+
+
+@mcp.tool()
+def brain_health_check() -> Dict[str, Any]:
+    """Check DB connectivity, Mem0 import status, collection existence, and memory counts."""
+    result: Dict[str, Any] = {
+        "ok": False,
+        "collection": COLLECTION,
+        "table": BRAIN_TABLE,
+        "db_url_configured": bool(DB_URL),
+        "mem0_importable": Memory is not None,
+        "checked_at": _now_iso(),
+    }
+    try:
+        with _connect() as conn, conn.cursor() as cur:
+            cur.execute("select to_regclass(%s) as reg", (f"{BRAIN_SCHEMA}.{COLLECTION}",))
+            result["table_exists"] = bool(cur.fetchone()["reg"])
+            if result["table_exists"]:
+                cur.execute(f"select count(*) as total from {BRAIN_TABLE}")
+                result["total_memories"] = cur.fetchone()["total"]
+                cur.execute(f"select count(*) as archived from {BRAIN_TABLE} where coalesce((metadata->>'archived')::boolean, false) or metadata ? 'archived_at'")
+                result["archived_memories"] = cur.fetchone()["archived"]
+            result["ok"] = bool(result.get("table_exists"))
+    except Exception as e:
+        result["error"] = str(e)
+    return result
+
+
+@mcp.tool()
+def brain_search(query: str, top_k: int = 5, user_id: Optional[str] = None, include_archived: bool = False) -> Dict[str, Any]:
+    """Semantic search the brain via Mem0/Supabase. Falls back to text search if Mem0 fails."""
+    top_k = max(1, min(int(top_k or 5), 20))
+    user_id = user_id or DEFAULT_USER_ID
+    try:
+        engine = _memory_engine()
+        raw = engine.search(query=query, filters={"user_id": user_id}, top_k=top_k)
+        memories = raw.get("results", raw) if isinstance(raw, dict) else raw
+        if not include_archived and isinstance(memories, list):
+            memories = [m for m in memories if not ((m.get("metadata") or {}).get("archived") or (m.get("metadata") or {}).get("archived_at"))]
+        return {"ok": True, "mode": "semantic", "query": query, "results": memories}
+    except Exception as e:
+        # Conservative fallback: ILIKE against metadata->data.
+        try:
+            return brain_text_search(query=query, limit=top_k, user_id=user_id, include_archived=include_archived) | {"semantic_error": str(e)}
+        except Exception:
+            return {"ok": False, "error": str(e), "traceback": traceback.format_exc(limit=2)}
+
+
+@mcp.tool()
+def brain_text_search(query: str, limit: int = 10, user_id: Optional[str] = None, category: Optional[str] = None, include_archived: bool = False) -> Dict[str, Any]:
+    """Admin text search over memory text/metadata; no embedding needed."""
+    limit = max(1, min(int(limit or 10), 50))
+    pattern = f"%{query}%"
+    clauses = ["coalesce(metadata->>'data','') ilike %s"]
+    params: List[Any] = [pattern]
+    if user_id:
+        clauses.append("metadata->>'user_id' = %s")
+        params.append(user_id)
+    if category:
+        clauses.append("metadata->>'category' = %s")
+        params.append(category)
+    if not include_archived:
+        clauses.append("not (coalesce((metadata->>'archived')::boolean, false) or metadata ? 'archived_at')")
+    params.append(limit)
+    sql = f"select id, metadata from {BRAIN_TABLE} where {' and '.join(clauses)} order by coalesce(metadata->>'updated_at', metadata->>'created_at') desc nulls last limit %s"
+    with _connect() as conn, conn.cursor() as cur:
+        cur.execute(sql, params)
+        rows = [_sanitize_row(r) for r in cur.fetchall()]
+    return {"ok": True, "mode": "text", "query": query, "count": len(rows), "results": rows}
+
+
+@mcp.tool()
+def brain_profile(user_id: Optional[str] = None, limit: int = 20, include_archived: bool = False) -> Dict[str, Any]:
+    """Return a broad recent/high-importance profile slice for a user."""
+    user_id = user_id or DEFAULT_USER_ID
+    limit = max(1, min(int(limit or 20), 50))
+    clauses = ["metadata->>'user_id' = %s"]
+    params: List[Any] = [user_id]
+    if not include_archived:
+        clauses.append("not (coalesce((metadata->>'archived')::boolean, false) or metadata ? 'archived_at')")
+    params.append(limit)
+    sql = f"""
+        select id, metadata from {BRAIN_TABLE}
+        where {' and '.join(clauses)}
+        order by coalesce((metadata->>'importance')::int, 0) desc,
+                 coalesce(metadata->>'updated_at', metadata->>'created_at') desc nulls last
+        limit %s
+    """
+    with _connect() as conn, conn.cursor() as cur:
+        cur.execute(sql, params)
+        rows = [_sanitize_row(r) for r in cur.fetchall()]
+    return {"ok": True, "user_id": user_id, "count": len(rows), "results": rows}
+
+
+@mcp.tool()
+def brain_get_memory(memory_id: str) -> Dict[str, Any]:
+    """Fetch one memory by ID with metadata. Vector is intentionally excluded."""
+    with _connect() as conn, conn.cursor() as cur:
+        cur.execute(f"select id, metadata from {BRAIN_TABLE} where id = %s", (memory_id,))
+        row = cur.fetchone()
+    if not row:
+        return {"ok": False, "error": "memory_not_found", "memory_id": memory_id}
+    return {"ok": True, "memory": _sanitize_row(row)}
+
+
+@mcp.tool()
+def brain_remember(memory: str, category: str = "general", importance: int = 5, user_id: Optional[str] = None, agent_id: Optional[str] = None) -> Dict[str, Any]:
+    """Store an explicit durable fact through Mem0. Use only for curated facts, not raw transcripts."""
+    if not memory or len(memory.strip()) < 3:
+        return {"ok": False, "error": "memory text is required"}
+    importance = max(0, min(int(importance or 0), 10))
+    user_id = user_id or DEFAULT_USER_ID
+    agent_id = agent_id or DEFAULT_AGENT_ID
+    metadata = {
+        "category": category,
+        "importance": importance,
+        "source": "mcp_brain_manager",
+        "agent_id": agent_id,
+        "created_at": _now_iso(),
+        "updated_at": _now_iso(),
+    }
+    engine = _memory_engine()
+    raw = engine.add([{"role": "user", "content": memory}], user_id=user_id, metadata=metadata)
+    return {"ok": True, "user_id": user_id, "category": category, "importance": importance, "result": raw}
+
+
+@mcp.tool()
+def brain_update_metadata(memory_id: str, category: Optional[str] = None, importance: Optional[int] = None, extra_metadata_json: Optional[str] = None, actor: str = "mcp_brain_manager") -> Dict[str, Any]:
+    """Safely update selected metadata fields. Does not edit vector/content."""
+    allowed_extra = {"source", "agent_id", "note", "tags", "reviewed", "quality", "provenance"}
+    with _connect() as conn, conn.cursor() as cur:
+        cur.execute(f"select metadata from {BRAIN_TABLE} where id = %s for update", (memory_id,))
+        row = cur.fetchone()
+        if not row:
+            return {"ok": False, "error": "memory_not_found", "memory_id": memory_id}
+        prev = dict(row["metadata"] or {})
+        new = dict(prev)
+        if category is not None:
+            new["category"] = category
+        if importance is not None:
+            new["importance"] = max(0, min(int(importance), 10))
+        if extra_metadata_json:
+            extra = json.loads(extra_metadata_json)
+            rejected = sorted(set(extra) - allowed_extra)
+            if rejected:
+                return {"ok": False, "error": "extra metadata contains disallowed keys", "rejected_keys": rejected, "allowed_keys": sorted(allowed_extra)}
+            new.update(extra)
+        new["updated_at"] = _now_iso()
+        _exec_history(cur, memory_id, prev, new, actor)
+        cur.execute(f"update {BRAIN_TABLE} set metadata = %s::jsonb where id = %s", (json.dumps(new), memory_id))
+        conn.commit()
+    return {"ok": True, "memory_id": memory_id, "previous": prev, "updated": new}
+
+
+@mcp.tool()
+def brain_archive_memory(memory_id: str, reason: str = "archived via MCP brain-manager", actor: str = "mcp_brain_manager") -> Dict[str, Any]:
+    """Soft-archive a memory. This never hard-deletes the row."""
+    with _connect() as conn, conn.cursor() as cur:
+        cur.execute(f"select metadata from {BRAIN_TABLE} where id = %s for update", (memory_id,))
+        row = cur.fetchone()
+        if not row:
+            return {"ok": False, "error": "memory_not_found", "memory_id": memory_id}
+        prev = dict(row["metadata"] or {})
+        new = dict(prev)
+        new.update({"archived": True, "archived_at": _now_iso(), "archive_reason": reason, "updated_at": _now_iso()})
+        _exec_history(cur, memory_id, prev, new, actor)
+        cur.execute(f"update {BRAIN_TABLE} set metadata = %s::jsonb where id = %s", (json.dumps(new), memory_id))
+        conn.commit()
+    return {"ok": True, "memory_id": memory_id, "archived": True, "reason": reason}
+
+
+@mcp.tool()
+def brain_quality_report(user_id: Optional[str] = None, include_archived: bool = False) -> Dict[str, Any]:
+    """Return memory quality/admin metrics: counts, categories, missing fields, stale rows."""
+    clauses: List[str] = []
+    params: List[Any] = []
+    if user_id:
+        clauses.append("metadata->>'user_id' = %s")
+        params.append(user_id)
+    if not include_archived:
+        clauses.append("not (coalesce((metadata->>'archived')::boolean, false) or metadata ? 'archived_at')")
+    where = f"where {' and '.join(clauses)}" if clauses else ""
+    with _connect() as conn, conn.cursor() as cur:
+        cur.execute(f"select count(*) as total from {BRAIN_TABLE} {where}", params)
+        total = cur.fetchone()["total"]
+        cur.execute(f"select coalesce(metadata->>'category','uncategorized') as category, count(*) as count from {BRAIN_TABLE} {where} group by 1 order by count desc", params)
+        categories = cur.fetchall()
+        cur.execute(f"select count(*) as missing_importance from {BRAIN_TABLE} {where + (' and' if where else 'where')} not (metadata ? 'importance')", params)
+        missing_importance = cur.fetchone()["missing_importance"]
+        cur.execute(f"select count(*) as missing_user_id from {BRAIN_TABLE} {where + (' and' if where else 'where')} not (metadata ? 'user_id')", params)
+        missing_user_id = cur.fetchone()["missing_user_id"]
+        cur.execute(f"select id, metadata from {BRAIN_TABLE} {where} order by length(coalesce(metadata->>'data','')) asc limit 10", params)
+        shortest = [_sanitize_row(r) for r in cur.fetchall()]
+    return {
+        "ok": True,
+        "user_id": user_id,
+        "total": total,
+        "categories": categories,
+        "missing_importance": missing_importance,
+        "missing_user_id": missing_user_id,
+        "shortest_memories_sample": shortest,
+    }
+
+
+@mcp.tool()
+def brain_find_duplicates(user_id: Optional[str] = None, threshold: float = 0.35, limit: int = 20) -> Dict[str, Any]:
+    """Find likely duplicate memories using pgvector cosine distance. Lower distance = more similar."""
+    limit = max(1, min(int(limit or 20), 100))
+    threshold = max(0.0, min(float(threshold), 2.0))
+    clauses = ["a.id < b.id", "(a.vec <=> b.vec) <= %s"]
+    params: List[Any] = [threshold]
+    if user_id:
+        clauses.append("a.metadata->>'user_id' = %s")
+        clauses.append("b.metadata->>'user_id' = %s")
+        params.extend([user_id, user_id])
+    clauses.extend([
+        "not (coalesce((a.metadata->>'archived')::boolean, false) or a.metadata ? 'archived_at')",
+        "not (coalesce((b.metadata->>'archived')::boolean, false) or b.metadata ? 'archived_at')",
+    ])
+    params.append(limit)
+    sql = f"""
+        select a.id as id_a, b.id as id_b, (a.vec <=> b.vec) as distance,
+               a.metadata as metadata_a, b.metadata as metadata_b
+        from {BRAIN_TABLE} a
+        join {BRAIN_TABLE} b on {' and '.join(clauses)}
+        order by distance asc
+        limit %s
+    """
+    with _connect() as conn, conn.cursor() as cur:
+        cur.execute(sql, params)
+        pairs = []
+        for r in cur.fetchall():
+            pairs.append({
+                "distance": float(r["distance"]),
+                "a": _sanitize_row({"id": r["id_a"], "metadata": r["metadata_a"]}),
+                "b": _sanitize_row({"id": r["id_b"], "metadata": r["metadata_b"]}),
+            })
+    return {"ok": True, "threshold": threshold, "count": len(pairs), "pairs": pairs}
+
+
+if __name__ == "__main__":
+    mcp.run()
