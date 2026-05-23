@@ -9,19 +9,51 @@ SUPABASE_BRAIN_DB_URL="postgresql://...?...sslmode=require"
 OPENAI_API_KEY="sk-..."
 ```
 
-Optional:
+## Optional env vars
 
 ```env
 SUPABASE_BRAIN_COLLECTION="hermes_brain"
 SUPABASE_BRAIN_AUTO_SYNC="false"
 SUPABASE_BRAIN_USER_ID="hermes-user"
 SUPABASE_BRAIN_AGENT_ID="hermes"
+SUPABASE_BRAIN_DEFAULT_SCOPE="agent"
+SUPABASE_BRAIN_DEFAULT_VISIBILITY="private"
 ```
+
+For multi-agent deployments, keep the same `SUPABASE_BRAIN_COLLECTION` and set a unique `SUPABASE_BRAIN_AGENT_ID` for each agent.
+
+## Governance metadata
+
+Every explicit `brain_remember` write includes:
+
+```json
+{
+  "user_id": "...",
+  "agent_id": "...",
+  "created_by_agent": "...",
+  "owner_agent_id": "...",
+  "scope": "agent | shared | user | project",
+  "visibility": "private | shared | restricted",
+  "project_id": "optional-project-id",
+  "category": "...",
+  "importance": 1
+}
+```
+
+Defaults:
+
+- `scope=agent`
+- `visibility=private`
+- `owner_agent_id=$SUPABASE_BRAIN_AGENT_ID`
+
+Use `scope=shared, visibility=shared` for memories that should be available to all trusted agents sharing the same user/collection.
+
+Use `scope=project, project_id=<project>, visibility=shared` for project-level knowledge.
 
 ## Tools
 
-- `brain_search` — semantic search over Supabase-backed memories
-- `brain_remember` — store an explicit durable fact
-- `brain_profile` — retrieve broader profile/overview memories
+- `brain_search` — semantic search over Supabase-backed memories. By default it returns shared/user memories plus private memories owned by the current agent.
+- `brain_remember` — store an explicit durable fact with governance metadata.
+- `brain_profile` — retrieve broader profile/overview memories for the current user/agent view.
 
-By default, automatic per-turn sync is disabled. This avoids dumping every chat turn into the brain before governance is designed.
+By default, automatic per-turn sync is disabled. This avoids dumping every chat turn into the brain before governance/review workflows are ready.

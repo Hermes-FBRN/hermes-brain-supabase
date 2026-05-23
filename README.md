@@ -1,72 +1,164 @@
 # Hermes Brain — Supabase + Mem0
 
-Plugin custom per Hermes Agent che aggiunge memoria semantica persistente
-usando Mem0 OSS con Supabase pgvector come backend.
+Custom Hermes Agent memory plugin that adds persistent semantic memory using Mem0 OSS with Supabase pgvector as the backend, plus a safe Brain Manager MCP server for administration.
 
-## Cosa contiene
+## What it contains
 
-| Path | Descrizione |
+| Path | Description |
 |------|-------------|
-| `plugin/` | Memory provider `supabase_mem0` — si auto-registra in Hermes |
-| `mcp-server/` | MCP brain-manager per amministrazione (archive, dedup, quality report) |
-| `install.sh` | Script di installazione idempotente — copia tutto in `$HERMES_HOME` |
-| `README.md` | Questo file |
+| `plugin/` | Memory provider `supabase_mem0` — auto-registers in Hermes |
+| `mcp-server/` | Brain Manager MCP server for health, search, remember, archive, dedup, quality reports |
+| `install.sh` | Idempotent installer — copies plugin, MCP server, and vendored deps into `$HERMES_HOME` |
+| `README.md` | This file |
 
 ## Quick start
 
 ```bash
-git clone https://github.com/hermes-fbrn/hermes-brain-supabase.git
+git clone https://github.com/Hermes-FBRN/hermes-brain-supabase.git
 cd hermes-brain-supabase
 bash install.sh
 ```
 
-L'installazione è idempotente: se il plugin esiste già, salta tutto.
+The install is idempotent: if files already exist, it skips them.
 
-Il plugin viene installato ma **NON attivato**. Per attivarlo:
+The plugin is installed but **NOT activated**. To activate it:
 
 ```bash
-hermes memory setup          # wizard → scegli supabase_mem0
-# oppure
+hermes memory setup          # wizard → choose supabase_mem0
+# or
 hermes config set memory.provider supabase_mem0
 ```
 
-## Env vars richieste
+## Required env vars
 
 ```env
-SUPABASE_BRAIN_DB_URL=postgresql://postgres.xxxx:password@aws-0-eu-central-1.pooler.supabase.com:5432/postgres?sslmode=require
+SUPABASE_BRAIN_DB_URL=postgresql://postgres.xxxx:***@aws-0-eu-central-1.pooler.supabase.com:5432/postgres?sslmode=require
 OPENAI_API_KEY=sk-...
 ```
 
-Opzionali:
+## Multi-agent identity and governance
+
+The repo is generic: agent names are **not hardcoded**. Set identity per Hermes instance through env vars.
+
+For three agents sharing one Supabase brain, use the same DB and collection, but different agent IDs:
+
 ```env
 SUPABASE_BRAIN_COLLECTION=hermes_brain
-SUPABASE_BRAIN_USER_ID=hermes-user
-SUPABASE_BRAIN_AGENT_ID=hermes
+SUPABASE_BRAIN_USER_ID=462939789210157056
+SUPABASE_BRAIN_AGENT_ID=hermes-main        # change per agent
+SUPABASE_BRAIN_DEFAULT_SCOPE=agent         # default: private to this agent
+SUPABASE_BRAIN_DEFAULT_VISIBILITY=private  # default: not shown to other agents
+SUPABASE_BRAIN_AUTO_SYNC=false             # recommended
 ```
 
-## Integrazione in start.sh
+Each stored memory gets governance metadata:
 
-Aggiungi questo blocco prima di avviare Hermes:
+```json
+{
+  "user_id": "462939789210157056",
+  "agent_id": "hermes-main",
+  "created_by_agent": "hermes-main",
+  "owner_agent_id": "hermes-main",
+  "scope": "agent",
+  "visibility": "private",
+  "project_id": "optional-project-name",
+  "category": "infra",
+  "importance": 8,
+  "source": "hermes_brain_remember"
+}
+```
+
+Supported scopes:
+
+| Scope | Meaning |
+|-------|---------|
+| `agent` | Private/specific to one agent by default |
+| `shared` | Useful to all agents |
+| `user` | User profile/preference memory, readable to all trusted agents for that user |
+| `project` | Project-specific memory, optionally tagged with `project_id` |
+
+Supported visibility values:
+
+| Visibility | Meaning |
+|------------|---------|
+| `private` | Returned only to the owning/current agent by default |
+| `shared` | Returned to all trusted agents sharing the same user/collection |
+| `restricted` | Reserved for stricter future policy / explicit admin workflows |
+
+Search defaults to shared/user memories plus private memories owned by the current agent. Admin tools can pass `include_private=true` when needed.
+
+## Brain Manager MCP setup
+
+After `bash install.sh`, add this to `$HERMES_HOME/config.yaml`:
+
+```yaml
+mcp_servers:
+  brain-manager:
+    command: python3
+    args:
+      - /data/.hermes/mcp/brain-manager/server.py
+    timeout: 120
+    sampling:
+      enabled: false
+```
+
+Then reload MCP in chat:
+
+```text
+/reload-mcp
+```
+
+The MCP server supports the same governance fields on `brain_remember`:
+
+```json
+{
+  "memory": "Stable fact to store",
+  "category": "project",
+  "importance": 8,
+  "scope": "project",
+  "visibility": "shared",
+  "project_id": "brain-manager"
+}
+```
+
+## Railway `start.sh` integration
+
+Add this block before starting Hermes:
 
 ```bash
-# Brain plugin — installa al primo deploy, idempotente
-BRAIN_DIR="/app/hermes-brain-supabase"
-if [[ -d "$BRAIN_DIR" ]] && [[ ! -d "${HERMES_HOME}/plugins/supabase_mem0" ]]; then
-    echo "[start.sh] Installing brain plugin..."
-    bash "$BRAIN_DIR/install.sh" || echo "[start.sh] Brain install failed (non-fatal)"
+if [[ "${HERMES_BRAIN_BOOTSTRAP:-1}" != "0" ]]; then
+    BRAIN_DIR="${HOME}/Developer/hermes-brain-supabase"
+
+    if [[ ! -d "${HERMES_HOME}/plugins/supabase_mem0" ]]; then
+        echo "[start.sh] Installing brain plugin..."
+
+        if [[ ! -d "$BRAIN_DIR" ]]; then
+            git clone https://github.com/Hermes-FBRN/hermes-brain-supabase.git "$BRAIN_DIR" 2>/dev/null || true
+        fi
+
+        if [[ -f "$BRAIN_DIR/install.sh" ]]; then
+            bash "$BRAIN_DIR/install.sh" || echo "[start.sh] Brain install failed (non-fatal)"
+        fi
+    fi
 fi
 ```
 
-## Struttura completa
+Disable bootstrap on a clone with:
 
+```env
+HERMES_BRAIN_BOOTSTRAP=0
 ```
+
+## Repository structure
+
+```text
 hermes-brain-supabase/
 ├── README.md
 ├── install.sh
 ├── plugin/
 │   ├── plugin.yaml
 │   ├── README.md
-│   └── __init__.py          # provider Python
+│   └── __init__.py          # Hermes memory provider
 └── mcp-server/
-    └── server.py             # brain-manager MCP
+    └── server.py             # Brain Manager MCP
 ```

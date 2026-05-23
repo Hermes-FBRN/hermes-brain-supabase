@@ -24,27 +24,27 @@ warn()    { echo "[brain-install] ⚠ $*"; }
 # ── Plugin ────────────────────────────────────────────────────────────────
 PLUGIN_DST="$HERMES_HOME/plugins/supabase_mem0"
 if [[ -d "$PLUGIN_DST" ]]; then
-    skip "Plugin → $PLUGIN_DST"
+    info "Updating plugin files → $PLUGIN_DST"
 else
     info "Installing plugin → $PLUGIN_DST"
     mkdir -p "$PLUGIN_DST"
-    cp "$PLUGIN_SRC/plugin.yaml" "$PLUGIN_DST/"
-    cp "$PLUGIN_SRC/README.md"   "$PLUGIN_DST/"
-    cp "$PLUGIN_SRC/__init__.py" "$PLUGIN_DST/"
-    done_ "Plugin installed"
 fi
+cp "$PLUGIN_SRC/plugin.yaml" "$PLUGIN_DST/"
+cp "$PLUGIN_SRC/README.md"   "$PLUGIN_DST/"
+cp "$PLUGIN_SRC/__init__.py" "$PLUGIN_DST/"
+done_ "Plugin files ready"
 
 # ── MCP server ─────────────────────────────────────────────────────────────
 MCP_DST="$HERMES_HOME/mcp/brain-manager"
 if [[ -f "$MCP_DST/server.py" ]]; then
-    skip "MCP server → $MCP_DST/server.py"
+    info "Updating MCP server → $MCP_DST/server.py"
 else
     info "Installing MCP server → $MCP_DST"
     mkdir -p "$MCP_DST"
-    cp "$MCP_SRC/server.py" "$MCP_DST/server.py"
-    chmod +x "$MCP_DST/server.py"
-    done_ "MCP server installed"
 fi
+cp "$MCP_SRC/server.py" "$MCP_DST/server.py"
+chmod +x "$MCP_DST/server.py"
+done_ "MCP server ready"
 
 # ── Vendor deps ────────────────────────────────────────────────────────────
 VENDOR_DIR="$HERMES_HOME/vendor/supabase_mem0"

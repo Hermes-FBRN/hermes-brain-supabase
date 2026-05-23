@@ -21,6 +21,19 @@ from tools.registry import tool_error
 
 logger = logging.getLogger(__name__)
 
+_ALLOWED_SCOPES = {"shared", "user", "agent", "project"}
+_ALLOWED_VISIBILITIES = {"shared", "private", "restricted"}
+
+
+def _clean_choice(value: Any, allowed: set[str], default: str) -> str:
+    text = str(value or "").strip().lower()
+    return text if text in allowed else default
+
+
+def _clean_text(value: Any) -> Optional[str]:
+    text = str(value or "").strip()
+    return text or None
+
 _BRAIN_SEARCH_SCHEMA = {
     "name": "brain_search",
     "description": "Search the Supabase-backed brain by semantic meaning. Use for user preferences, project facts, decisions, and durable knowledge.",
@@ -30,6 +43,10 @@ _BRAIN_SEARCH_SCHEMA = {
             "query": {"type": "string", "description": "What to search for."},
             "top_k": {"type": "integer", "description": "Maximum results, default 5, max 20."},
             "category": {"type": "string", "description": "Optional category metadata filter."},
+            "scope": {"type": "string", "description": "Optional scope filter: shared, user, agent, or project."},
+            "visibility": {"type": "string", "description": "Optional visibility filter: shared, private, or restricted."},
+            "project_id": {"type": "string", "description": "Optional project identifier filter."},
+            "include_private": {"type": "boolean", "description": "If true, include private memories owned by other agents. Defaults to false."},
         },
         "required": ["query"],
     },
@@ -44,6 +61,10 @@ _BRAIN_REMEMBER_SCHEMA = {
             "memory": {"type": "string", "description": "The durable fact to store."},
             "category": {"type": "string", "description": "Optional category, e.g. preference, project, infra, workflow."},
             "importance": {"type": "integer", "description": "Optional importance 1-10."},
+            "scope": {"type": "string", "description": "Memory scope: shared, user, agent, or project. Defaults to agent."},
+            "visibility": {"type": "string", "description": "Memory visibility: shared, private, or restricted. Defaults to private unless scope=shared."},
+            "project_id": {"type": "string", "description": "Optional project identifier for project-scoped memories."},
+            "owner_agent_id": {"type": "string", "description": "Optional owner agent id. Defaults to this agent."},
         },
         "required": ["memory"],
     },
@@ -126,6 +147,8 @@ class SupabaseMem0MemoryProvider(MemoryProvider):
         self._user_id = "hermes-user"
         self._agent_id = "hermes"
         self._auto_sync = False
+        self._default_scope = "agent"
+        self._default_visibility = "private"
         self._initialized = False
 
     @property
@@ -151,6 +174,10 @@ class SupabaseMem0MemoryProvider(MemoryProvider):
             {"key": "db_url", "description": "Supabase Postgres connection string", "secret": True, "required": True, "env_var": "SUPABASE_BRAIN_DB_URL"},
             {"key": "openai_api_key", "description": "OpenAI key used by Mem0 for extraction/embeddings", "secret": True, "required": True, "env_var": "OPENAI_API_KEY"},
             {"key": "collection", "description": "Supabase/vecs collection name", "default": "hermes_brain"},
+            {"key": "user_id", "description": "Tenant/user scope written to metadata", "default": "hermes-user", "env_var": "SUPABASE_BRAIN_USER_ID"},
+            {"key": "agent_id", "description": "Stable ID of this Hermes agent", "default": "hermes", "env_var": "SUPABASE_BRAIN_AGENT_ID"},
+            {"key": "default_scope", "description": "Default scope for brain_remember", "default": "agent", "choices": ["agent", "shared", "user", "project"]},
+            {"key": "default_visibility", "description": "Default visibility for brain_remember", "default": "private", "choices": ["private", "shared", "restricted"]},
             {"key": "auto_sync", "description": "Automatically sync every completed turn", "default": "false", "choices": ["true", "false"]},
         ]
 
@@ -173,6 +200,8 @@ class SupabaseMem0MemoryProvider(MemoryProvider):
         self._collection = os.environ.get("SUPABASE_BRAIN_COLLECTION") or cfg.get("collection") or "hermes_brain"
         self._user_id = kwargs.get("user_id") or os.environ.get("SUPABASE_BRAIN_USER_ID") or cfg.get("user_id") or "hermes-user"
         self._agent_id = os.environ.get("SUPABASE_BRAIN_AGENT_ID") or cfg.get("agent_id") or "hermes"
+        self._default_scope = _clean_choice(os.environ.get("SUPABASE_BRAIN_DEFAULT_SCOPE") or cfg.get("default_scope"), _ALLOWED_SCOPES, "agent")
+        self._default_visibility = _clean_choice(os.environ.get("SUPABASE_BRAIN_DEFAULT_VISIBILITY") or cfg.get("default_visibility"), _ALLOWED_VISIBILITIES, "private")
         raw_auto = os.environ.get("SUPABASE_BRAIN_AUTO_SYNC", str(cfg.get("auto_sync", "false")))
         self._auto_sync = str(raw_auto).strip().lower() in {"1", "true", "yes", "on"}
         self._initialized = True
@@ -212,6 +241,48 @@ class SupabaseMem0MemoryProvider(MemoryProvider):
             filters.update({k: v for k, v in extra.items() if v is not None and v != ""})
         return filters
 
+    def _metadata(
+        self,
+        *,
+        source: str,
+        category: str = "memory",
+        importance: Any = None,
+        scope: Any = None,
+        visibility: Any = None,
+        project_id: Any = None,
+        owner_agent_id: Any = None,
+        **extra: Any,
+    ) -> Dict[str, Any]:
+        resolved_scope = _clean_choice(scope, _ALLOWED_SCOPES, self._default_scope)
+        default_visibility = "shared" if resolved_scope in {"shared", "user"} else self._default_visibility
+        resolved_visibility = _clean_choice(visibility, _ALLOWED_VISIBILITIES, default_visibility)
+        now_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        md: Dict[str, Any] = {
+            "source": source,
+            "category": category or "memory",
+            "importance": importance,
+            "user_id": self._user_id,
+            "agent_id": self._agent_id,
+            "created_by_agent": self._agent_id,
+            "owner_agent_id": _clean_text(owner_agent_id) or self._agent_id,
+            "scope": resolved_scope,
+            "visibility": resolved_visibility,
+            "created_at": now_iso,
+            "updated_at": now_iso,
+            "stored_at": int(time.time()),
+        }
+        pid = _clean_text(project_id)
+        if pid:
+            md["project_id"] = pid
+        md.update({k: v for k, v in extra.items() if v is not None and v != ""})
+        return md
+
+    def _visible_to_this_agent(self, metadata: Dict[str, Any]) -> bool:
+        if metadata.get("visibility") == "shared" or metadata.get("scope") in {"shared", "user"}:
+            return True
+        owner = metadata.get("owner_agent_id") or metadata.get("agent_id") or metadata.get("created_by_agent")
+        return owner in {None, "", self._agent_id}
+
     @staticmethod
     def _results(response: Any) -> List[Dict[str, Any]]:
         if isinstance(response, dict):
@@ -224,7 +295,7 @@ class SupabaseMem0MemoryProvider(MemoryProvider):
     def system_prompt_block(self) -> str:
         return (
             "# Supabase Brain Memory\n"
-            f"Active provider: supabase_mem0. User scope: {self._user_id}. Collection: {self._collection}.\n"
+            f"Active provider: supabase_mem0. User scope: {self._user_id}. Agent: {self._agent_id}. Collection: {self._collection}.\n"
             "Use brain_search for recall and brain_remember only for explicit durable facts. "
             "Do not store temporary progress or secrets."
         )
@@ -272,7 +343,7 @@ class SupabaseMem0MemoryProvider(MemoryProvider):
                     ],
                     user_id=self._user_id,
                     agent_id=self._agent_id,
-                    metadata={"source": "hermes_auto_sync", "session_id": session_id},
+                    metadata=self._metadata(source="hermes_auto_sync", category="auto_sync", scope="agent", visibility="private", session_id=session_id),
                 )
             except Exception as e:
                 logger.warning("supabase_mem0 sync failed: %s", e)
@@ -296,17 +367,23 @@ class SupabaseMem0MemoryProvider(MemoryProvider):
             if not query:
                 return tool_error("Missing required parameter: query")
             top_k = max(1, min(int(args.get("top_k") or 5), 20))
-            extra = {"category": args.get("category")} if args.get("category") else None
+            extra = {k: args.get(k) for k in ("category", "scope", "visibility", "project_id") if args.get(k)}
+            include_private = bool(args.get("include_private"))
             try:
-                response = mem.search(query=query, filters=self._filters(extra), top_k=top_k)
+                response = mem.search(query=query, filters=self._filters(extra), top_k=min(top_k * 4, 50))
                 items = []
                 for r in self._results(response):
+                    metadata = r.get("metadata") or {}
+                    if not include_private and not self._visible_to_this_agent(metadata):
+                        continue
                     items.append({
                         "memory": r.get("memory") or r.get("text") or "",
                         "score": r.get("score"),
-                        "metadata": r.get("metadata") or {},
+                        "metadata": metadata,
                     })
-                return json.dumps({"results": items, "count": len(items)})
+                    if len(items) >= top_k:
+                        break
+                return json.dumps({"results": items, "count": len(items), "agent_id": self._agent_id})
             except Exception as e:
                 return tool_error(f"brain_search failed: {e}")
 
@@ -314,13 +391,15 @@ class SupabaseMem0MemoryProvider(MemoryProvider):
             text = str(args.get("memory") or "").strip()
             if not text:
                 return tool_error("Missing required parameter: memory")
-            metadata = {
-                "source": "hermes_brain_remember",
-                "category": args.get("category") or "memory",
-                "importance": args.get("importance"),
-                "agent_id": self._agent_id,
-                "stored_at": int(time.time()),
-            }
+            metadata = self._metadata(
+                source="hermes_brain_remember",
+                category=args.get("category") or "memory",
+                importance=args.get("importance"),
+                scope=args.get("scope"),
+                visibility=args.get("visibility"),
+                project_id=args.get("project_id"),
+                owner_agent_id=args.get("owner_agent_id"),
+            )
             try:
                 mem.add(
                     [{"role": "user", "content": text}],
@@ -329,7 +408,7 @@ class SupabaseMem0MemoryProvider(MemoryProvider):
                     metadata=metadata,
                     infer=False,
                 )
-                return json.dumps({"result": "stored", "category": metadata["category"]})
+                return json.dumps({"result": "stored", "category": metadata["category"], "metadata": metadata})
             except TypeError:
                 # Older/local Mem0 builds may not accept infer=False.
                 try:
@@ -339,7 +418,7 @@ class SupabaseMem0MemoryProvider(MemoryProvider):
                         agent_id=self._agent_id,
                         metadata=metadata,
                     )
-                    return json.dumps({"result": "stored", "category": metadata["category"]})
+                    return json.dumps({"result": "stored", "category": metadata["category"], "metadata": metadata})
                 except Exception as e:
                     return tool_error(f"brain_remember failed: {e}")
             except Exception as e:
@@ -350,8 +429,14 @@ class SupabaseMem0MemoryProvider(MemoryProvider):
             try:
                 # Broad neutral query works across Mem0 OSS without relying on get_all availability.
                 response = mem.search(query="user preferences projects decisions stable facts profile", filters=self._filters(), top_k=top_k)
-                items = [{"memory": r.get("memory") or r.get("text") or "", "score": r.get("score")} for r in self._results(response)]
-                return json.dumps({"results": items, "count": len(items)})
+                items = []
+                for r in self._results(response):
+                    metadata = r.get("metadata") or {}
+                    if self._visible_to_this_agent(metadata):
+                        items.append({"memory": r.get("memory") or r.get("text") or "", "score": r.get("score"), "metadata": metadata})
+                    if len(items) >= top_k:
+                        break
+                return json.dumps({"results": items, "count": len(items), "agent_id": self._agent_id})
             except Exception as e:
                 return tool_error(f"brain_profile failed: {e}")
 
