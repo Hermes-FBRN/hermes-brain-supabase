@@ -40,12 +40,12 @@ OPENAI_API_KEY=sk-...
 
 The repo is generic: agent names are **not hardcoded**. Set identity per Hermes instance through env vars.
 
-For three agents sharing one Supabase brain, use the same DB and collection, but different agent IDs:
+For multiple independent **main agents** sharing one Supabase brain, use the same DB and collection, but different main-agent IDs. Subagent/profile names must stay separate from main-agent IDs:
 
 ```env
 SUPABASE_BRAIN_COLLECTION=hermes_brain
 SUPABASE_BRAIN_USER_ID=462939789210157056
-SUPABASE_BRAIN_AGENT_ID=hermes-main        # change per agent
+SUPABASE_BRAIN_AGENT_ID=hermes-main        # main agent id; change per independent main agent
 SUPABASE_BRAIN_DEFAULT_SCOPE=agent         # default: private to this agent
 SUPABASE_BRAIN_DEFAULT_VISIBILITY=private  # default: not shown to other agents
 SUPABASE_BRAIN_AUTO_SYNC=false             # recommended
@@ -59,6 +59,9 @@ Each stored memory gets governance metadata:
   "agent_id": "hermes-main",
   "created_by_agent": "hermes-main",
   "owner_agent_id": "hermes-main",
+  "main_agent_id": "hermes-main",
+  "subagent_profile_id": "optional-profile-name",
+  "subject_agent_id": "optional-agent-or-profile-name",
   "scope": "agent",
   "visibility": "private",
   "project_id": "optional-project-name",
@@ -85,7 +88,7 @@ Supported visibility values:
 | `shared` | Returned to all trusted agents sharing the same user/collection |
 | `restricted` | Reserved for stricter future policy / explicit admin workflows |
 
-Search defaults to shared/user memories plus private memories owned by the current agent. Admin tools can pass `include_private=true` when needed.
+Search defaults to shared/user memories plus private memories owned by the current main agent. Admin tools can pass `include_private=true` when needed. Use `subagent_profile_id` only when a main agent writes/reads on behalf of one of its internal profiles. For Hermes, profile names should be written explicitly as `claude-code-agent` and `codex-agent` to avoid confusing them with independent peer main agents.
 
 ## Brain Manager MCP setup
 
@@ -117,7 +120,10 @@ The MCP server supports the same governance fields on `brain_remember`:
   "importance": 8,
   "scope": "project",
   "visibility": "shared",
-  "project_id": "brain-manager"
+  "project_id": "brain-manager",
+  "main_agent_id": "hermes-main",
+  "subagent_profile_id": "codex-agent",
+  "subject_agent_id": "codex-agent"
 }
 ```
 

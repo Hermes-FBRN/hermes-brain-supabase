@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import time
 import traceback
@@ -63,6 +64,15 @@ DEFAULT_SCOPE = os.environ.get("SUPABASE_BRAIN_DEFAULT_SCOPE") or "agent"
 DEFAULT_VISIBILITY = os.environ.get("SUPABASE_BRAIN_DEFAULT_VISIBILITY") or "private"
 ALLOWED_SCOPES = {"shared", "user", "agent", "project"}
 ALLOWED_VISIBILITIES = {"shared", "private", "restricted"}
+QUERY_STOPWORDS = {
+    "the", "and", "for", "with", "this", "that", "from", "into", "what", "when", "where", "how",
+    "memory", "memories", "brain", "hermes", "agent", "agents", "current", "retrieval", "search",
+}
+GOVERNANCE_TERMS = {
+    "scope", "visibility", "owner_agent_id", "created_by_agent", "main_agent_id",
+    "subagent_profile_id", "subject_agent_id", "project_id",
+    "shared", "private", "peer", "peers", "governance", "registry", "policy", "durable",
+}
 
 
 def _choice(value: Any, allowed: set[str], default: str) -> str:
@@ -118,6 +128,9 @@ def _sanitize_row(row: Dict[str, Any], include_vector: bool = False) -> Dict[str
         "agent_id": md.get("agent_id"),
         "created_by_agent": md.get("created_by_agent"),
         "owner_agent_id": md.get("owner_agent_id"),
+        "main_agent_id": md.get("main_agent_id"),
+        "subagent_profile_id": md.get("subagent_profile_id"),
+        "subject_agent_id": md.get("subject_agent_id"),
         "scope": md.get("scope"),
         "visibility": md.get("visibility"),
         "project_id": md.get("project_id"),
@@ -143,6 +156,9 @@ def _build_memory_metadata(
     visibility: Optional[str] = None,
     project_id: Optional[str] = None,
     owner_agent_id: Optional[str] = None,
+    main_agent_id: Optional[str] = None,
+    subagent_profile_id: Optional[str] = None,
+    subject_agent_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     resolved_scope = _choice(scope, ALLOWED_SCOPES, DEFAULT_SCOPE)
     default_visibility = "shared" if resolved_scope in {"shared", "user"} else DEFAULT_VISIBILITY
@@ -155,7 +171,8 @@ def _build_memory_metadata(
         "user_id": user_id,
         "agent_id": agent_id,
         "created_by_agent": agent_id,
-        "owner_agent_id": _text(owner_agent_id) or agent_id,
+        "owner_agent_id": _text(owner_agent_id) or _text(main_agent_id) or agent_id,
+        "main_agent_id": _text(main_agent_id) or agent_id,
         "scope": resolved_scope,
         "visibility": resolved_visibility,
         "created_at": now,
@@ -164,6 +181,12 @@ def _build_memory_metadata(
     pid = _text(project_id)
     if pid:
         md["project_id"] = pid
+    subprofile = _text(subagent_profile_id)
+    if subprofile:
+        md["subagent_profile_id"] = subprofile
+    subject = _text(subject_agent_id)
+    if subject:
+        md["subject_agent_id"] = subject
     return md
 
 
@@ -172,6 +195,110 @@ def _visible_to_agent(md: Dict[str, Any], agent_id: str) -> bool:
         return True
     owner = md.get("owner_agent_id") or md.get("agent_id") or md.get("created_by_agent")
     return owner in {None, "", agent_id}
+
+
+def _query_terms(query: str) -> List[str]:
+    """Return stable terms for hybrid exact/semantic memory retrieval."""
+    seen: set[str] = set()
+    terms: List[str] = []
+    for term in re.findall(r"[A-Za-z0-9_\-]{3,}", query.lower()):
+        if term in QUERY_STOPWORDS or term in seen:
+            continue
+        seen.add(term)
+        terms.append(term)
+    return terms[:14]
+
+
+def _memory_text(item: Dict[str, Any]) -> str:
+    md = item.get("metadata") or {}
+    return " ".join(
+        str(x or "")
+        for x in (
+            item.get("memory"), item.get("data"), md.get("data"), md.get("category"), md.get("scope"),
+            md.get("visibility"), md.get("project_id"), md.get("owner_agent_id"), md.get("main_agent_id"),
+            md.get("created_by_agent"), md.get("subagent_profile_id"), md.get("subject_agent_id"),
+        )
+    ).lower()
+
+
+def _hybrid_rank(item: Dict[str, Any], query: str, terms: List[str]) -> float:
+    """Deterministic reranker so governance anchors are not buried by generic semantic matches."""
+    md = item.get("metadata") or {}
+    text = _memory_text(item)
+    overlap = sum(1 for t in terms if t in text)
+    score = float(overlap * 12)
+    q = query.lower().strip()
+    if q and q in text:
+        score += 40
+    if any(t in text for t in GOVERNANCE_TERMS & set(terms)):
+        score += 25
+    if md.get("category") in {"governance", "agent_registry", "architecture"}:
+        score += 20
+    if md.get("visibility") == "shared":
+        score += 8
+    if md.get("scope") in {"shared", "user", "project"}:
+        score += 6
+    try:
+        score += min(int(md.get("importance") or 0), 10)
+    except Exception:
+        pass
+    try:
+        # Mem0 scores can vary by backend; keep them as a tie-breaker only.
+        score += max(0.0, min(float(item.get("score") or 0.0), 1.0))
+    except Exception:
+        pass
+    return score
+
+
+def _text_candidates(
+    *,
+    query: str,
+    limit: int,
+    user_id: str,
+    agent_id: str,
+    scope: Optional[str] = None,
+    visibility: Optional[str] = None,
+    project_id: Optional[str] = None,
+    include_private: bool = False,
+    include_archived: bool = False,
+) -> List[Dict[str, Any]]:
+    """Broad OR text candidate search used to complement Mem0 semantic search."""
+    terms = _query_terms(query)
+    if not terms:
+        return []
+    clauses = ["metadata->>'user_id' = %s"]
+    params: List[Any] = [user_id]
+    term_clauses = []
+    for term in terms:
+        term_clauses.append("(coalesce(metadata->>'data','') ilike %s or metadata::text ilike %s)")
+        pattern = f"%{term}%"
+        params.extend([pattern, pattern])
+    clauses.append("(" + " or ".join(term_clauses) + ")")
+    if scope:
+        clauses.append("metadata->>'scope' = %s")
+        params.append(scope)
+    if visibility:
+        clauses.append("metadata->>'visibility' = %s")
+        params.append(visibility)
+    if project_id:
+        clauses.append("metadata->>'project_id' = %s")
+        params.append(project_id)
+    if not include_private:
+        clauses.append("(metadata->>'visibility' = 'shared' or metadata->>'scope' in ('shared','user') or coalesce(metadata->>'owner_agent_id', metadata->>'agent_id', metadata->>'created_by_agent', %s) = %s)")
+        params.extend([agent_id, agent_id])
+    if not include_archived:
+        clauses.append("not (coalesce((metadata->>'archived')::boolean, false) or metadata ? 'archived_at')")
+    params.append(max(limit, 1))
+    sql = f"""
+        select id, metadata from {BRAIN_TABLE}
+        where {' and '.join(clauses)}
+        order by coalesce((metadata->>'importance')::int, 0) desc,
+                 coalesce(metadata->>'updated_at', metadata->>'created_at') desc nulls last
+        limit %s
+    """
+    with _connect() as conn, conn.cursor() as cur:
+        cur.execute(sql, params)
+        return [_sanitize_row(r) for r in cur.fetchall()]
 
 
 def _exec_history(cur, memory_id: str, prev_metadata: Dict[str, Any], new_metadata: Dict[str, Any], actor: str) -> None:
@@ -216,7 +343,7 @@ def brain_health_check() -> Dict[str, Any]:
 
 @mcp.tool()
 def brain_search(query: str, top_k: int = 5, user_id: Optional[str] = None, agent_id: Optional[str] = None, scope: Optional[str] = None, visibility: Optional[str] = None, project_id: Optional[str] = None, include_private: bool = False, include_archived: bool = False) -> Dict[str, Any]:
-    """Semantic search the brain via Mem0/Supabase. By default returns shared/user memories plus private memories owned by this agent."""
+    """Hybrid search the brain: Mem0 semantic candidates + exact text/metadata anchors, reranked for governance terms."""
     top_k = max(1, min(int(top_k or 5), 20))
     user_id = user_id or DEFAULT_USER_ID
     agent_id = agent_id or DEFAULT_AGENT_ID
@@ -224,29 +351,73 @@ def brain_search(query: str, top_k: int = 5, user_id: Optional[str] = None, agen
     for key, value in (("scope", scope), ("visibility", visibility), ("project_id", project_id)):
         if value:
             filters[key] = value
+    terms = _query_terms(query)
+    semantic_error: Optional[str] = None
+    candidates: Dict[str, Dict[str, Any]] = {}
     try:
         engine = _memory_engine()
-        raw = engine.search(query=query, filters=filters, top_k=min(top_k * 4, 50))
+        raw = engine.search(query=query, filters=filters, top_k=min(top_k * 6, 50))
         memories = raw.get("results", raw) if isinstance(raw, dict) else raw
         if isinstance(memories, list):
-            filtered = []
             for m in memories:
                 md = m.get("metadata") or {}
                 if not include_archived and (md.get("archived") or md.get("archived_at")):
                     continue
                 if not include_private and not _visible_to_agent(md, agent_id):
                     continue
-                filtered.append(m)
-                if len(filtered) >= top_k:
-                    break
-            memories = filtered
-        return {"ok": True, "mode": "semantic", "query": query, "agent_id": agent_id, "filters": filters, "results": memories}
+                mid = str(m.get("id") or md.get("id") or md.get("data") or len(candidates))
+                candidates[mid] = {**m, "metadata": md, "source_modes": ["semantic"]}
     except Exception as e:
-        # Conservative fallback: ILIKE against metadata->data.
-        try:
-            return brain_text_search(query=query, limit=top_k, user_id=user_id, agent_id=agent_id, scope=scope, visibility=visibility, project_id=project_id, include_private=include_private, include_archived=include_archived) | {"semantic_error": str(e)}
-        except Exception:
-            return {"ok": False, "error": str(e), "traceback": traceback.format_exc(limit=2)}
+        semantic_error = str(e)
+
+    try:
+        for row in _text_candidates(
+            query=query,
+            limit=min(top_k * 8, 80),
+            user_id=user_id,
+            agent_id=agent_id,
+            scope=scope,
+            visibility=visibility,
+            project_id=project_id,
+            include_private=include_private,
+            include_archived=include_archived,
+        ):
+            mid = str(row.get("id"))
+            existing = candidates.get(mid)
+            if existing:
+                existing.setdefault("source_modes", ["semantic"]).append("text")
+                existing.setdefault("data", row.get("data"))
+                existing.setdefault("metadata", row.get("metadata") or {})
+            else:
+                candidates[mid] = {
+                    "id": row.get("id"),
+                    "memory": row.get("data") or "",
+                    "data": row.get("data"),
+                    "metadata": row.get("metadata") or {},
+                    "source_modes": ["text"],
+                }
+    except Exception as e:
+        if semantic_error:
+            return {"ok": False, "error": semantic_error, "text_error": str(e), "traceback": traceback.format_exc(limit=2)}
+
+    ranked = list(candidates.values())
+    for item in ranked:
+        item["hybrid_score"] = _hybrid_rank(item, query, terms)
+    ranked.sort(key=lambda item: item.get("hybrid_score", 0), reverse=True)
+    results = ranked[:top_k]
+    mode = "hybrid" if any("text" in item.get("source_modes", []) for item in results) else "semantic"
+    response: Dict[str, Any] = {
+        "ok": True,
+        "mode": mode,
+        "query": query,
+        "agent_id": agent_id,
+        "filters": filters,
+        "count": len(results),
+        "results": results,
+    }
+    if semantic_error:
+        response["semantic_error"] = semantic_error
+    return response
 
 
 @mcp.tool()
@@ -321,7 +492,7 @@ def brain_get_memory(memory_id: str) -> Dict[str, Any]:
 
 
 @mcp.tool()
-def brain_remember(memory: str, category: str = "general", importance: int = 5, user_id: Optional[str] = None, agent_id: Optional[str] = None, scope: Optional[str] = None, visibility: Optional[str] = None, project_id: Optional[str] = None, owner_agent_id: Optional[str] = None) -> Dict[str, Any]:
+def brain_remember(memory: str, category: str = "general", importance: int = 5, user_id: Optional[str] = None, agent_id: Optional[str] = None, scope: Optional[str] = None, visibility: Optional[str] = None, project_id: Optional[str] = None, owner_agent_id: Optional[str] = None, main_agent_id: Optional[str] = None, subagent_profile_id: Optional[str] = None, subject_agent_id: Optional[str] = None) -> Dict[str, Any]:
     """Store an explicit durable fact through Mem0. Use only for curated facts, not raw transcripts."""
     if not memory or len(memory.strip()) < 3:
         return {"ok": False, "error": "memory text is required"}
@@ -338,6 +509,9 @@ def brain_remember(memory: str, category: str = "general", importance: int = 5, 
         visibility=visibility,
         project_id=project_id,
         owner_agent_id=owner_agent_id,
+        main_agent_id=main_agent_id,
+        subagent_profile_id=subagent_profile_id,
+        subject_agent_id=subject_agent_id,
     )
     engine = _memory_engine()
     raw = engine.add([{"role": "user", "content": memory}], user_id=user_id, metadata=metadata)
@@ -347,7 +521,7 @@ def brain_remember(memory: str, category: str = "general", importance: int = 5, 
 @mcp.tool()
 def brain_update_metadata(memory_id: str, category: Optional[str] = None, importance: Optional[int] = None, extra_metadata_json: Optional[str] = None, actor: str = "mcp_brain_manager") -> Dict[str, Any]:
     """Safely update selected metadata fields. Does not edit vector/content."""
-    allowed_extra = {"source", "agent_id", "created_by_agent", "owner_agent_id", "scope", "visibility", "project_id", "user_id", "note", "tags", "reviewed", "quality", "provenance"}
+    allowed_extra = {"source", "agent_id", "created_by_agent", "owner_agent_id", "main_agent_id", "subagent_profile_id", "subject_agent_id", "scope", "visibility", "project_id", "user_id", "note", "tags", "reviewed", "quality", "provenance"}
     with _connect() as conn, conn.cursor() as cur:
         cur.execute(f"select metadata from {BRAIN_TABLE} where id = %s for update", (memory_id,))
         row = cur.fetchone()

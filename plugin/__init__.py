@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import sys
 import threading
 import time
@@ -23,6 +24,15 @@ logger = logging.getLogger(__name__)
 
 _ALLOWED_SCOPES = {"shared", "user", "agent", "project"}
 _ALLOWED_VISIBILITIES = {"shared", "private", "restricted"}
+_QUERY_STOPWORDS = {
+    "the", "and", "for", "with", "this", "that", "from", "into", "what", "when", "where", "how",
+    "memory", "memories", "brain", "hermes", "agent", "agents", "current", "retrieval", "search",
+}
+_GOVERNANCE_TERMS = {
+    "scope", "visibility", "owner_agent_id", "created_by_agent", "main_agent_id",
+    "subagent_profile_id", "subject_agent_id", "project_id",
+    "shared", "private", "peer", "peers", "governance", "registry", "policy", "durable",
+}
 
 
 def _clean_choice(value: Any, allowed: set[str], default: str) -> str:
@@ -64,7 +74,10 @@ _BRAIN_REMEMBER_SCHEMA = {
             "scope": {"type": "string", "description": "Memory scope: shared, user, agent, or project. Defaults to agent."},
             "visibility": {"type": "string", "description": "Memory visibility: shared, private, or restricted. Defaults to private unless scope=shared."},
             "project_id": {"type": "string", "description": "Optional project identifier for project-scoped memories."},
-            "owner_agent_id": {"type": "string", "description": "Optional owner agent id. Defaults to this agent."},
+            "owner_agent_id": {"type": "string", "description": "Optional owner main-agent id. Defaults to this agent."},
+            "main_agent_id": {"type": "string", "description": "Optional independent top-level agent id. Defaults to this agent."},
+            "subagent_profile_id": {"type": "string", "description": "Optional subagent/profile id under the main agent, e.g. claude-code-agent or codex-agent."},
+            "subject_agent_id": {"type": "string", "description": "Optional id of the agent/profile the memory is about."},
         },
         "required": ["memory"],
     },
@@ -251,6 +264,9 @@ class SupabaseMem0MemoryProvider(MemoryProvider):
         visibility: Any = None,
         project_id: Any = None,
         owner_agent_id: Any = None,
+        main_agent_id: Any = None,
+        subagent_profile_id: Any = None,
+        subject_agent_id: Any = None,
         **extra: Any,
     ) -> Dict[str, Any]:
         resolved_scope = _clean_choice(scope, _ALLOWED_SCOPES, self._default_scope)
@@ -264,7 +280,8 @@ class SupabaseMem0MemoryProvider(MemoryProvider):
             "user_id": self._user_id,
             "agent_id": self._agent_id,
             "created_by_agent": self._agent_id,
-            "owner_agent_id": _clean_text(owner_agent_id) or self._agent_id,
+            "owner_agent_id": _clean_text(owner_agent_id) or _clean_text(main_agent_id) or self._agent_id,
+            "main_agent_id": _clean_text(main_agent_id) or self._agent_id,
             "scope": resolved_scope,
             "visibility": resolved_visibility,
             "created_at": now_iso,
@@ -274,6 +291,12 @@ class SupabaseMem0MemoryProvider(MemoryProvider):
         pid = _clean_text(project_id)
         if pid:
             md["project_id"] = pid
+        subprofile = _clean_text(subagent_profile_id)
+        if subprofile:
+            md["subagent_profile_id"] = subprofile
+        subject = _clean_text(subject_agent_id)
+        if subject:
+            md["subject_agent_id"] = subject
         md.update({k: v for k, v in extra.items() if v is not None and v != ""})
         return md
 
@@ -282,6 +305,104 @@ class SupabaseMem0MemoryProvider(MemoryProvider):
             return True
         owner = metadata.get("owner_agent_id") or metadata.get("agent_id") or metadata.get("created_by_agent")
         return owner in {None, "", self._agent_id}
+
+    @staticmethod
+    def _query_terms(query: str) -> List[str]:
+        seen: set[str] = set()
+        terms: List[str] = []
+        for term in re.findall(r"[A-Za-z0-9_\-]{3,}", query.lower()):
+            if term in _QUERY_STOPWORDS or term in seen:
+                continue
+            seen.add(term)
+            terms.append(term)
+        return terms[:14]
+
+    @staticmethod
+    def _memory_text(item: Dict[str, Any]) -> str:
+        md = item.get("metadata") or {}
+        return " ".join(
+            str(x or "")
+            for x in (
+                item.get("memory"), item.get("data"), md.get("data"), md.get("category"), md.get("scope"),
+                md.get("visibility"), md.get("project_id"), md.get("owner_agent_id"), md.get("main_agent_id"),
+                md.get("created_by_agent"), md.get("subagent_profile_id"), md.get("subject_agent_id"),
+            )
+        ).lower()
+
+    def _hybrid_rank(self, item: Dict[str, Any], query: str, terms: List[str]) -> float:
+        md = item.get("metadata") or {}
+        text = self._memory_text(item)
+        overlap = sum(1 for t in terms if t in text)
+        score = float(overlap * 12)
+        q = query.lower().strip()
+        if q and q in text:
+            score += 40
+        if any(t in text for t in _GOVERNANCE_TERMS & set(terms)):
+            score += 25
+        if md.get("category") in {"governance", "agent_registry", "architecture"}:
+            score += 20
+        if md.get("visibility") == "shared":
+            score += 8
+        if md.get("scope") in {"shared", "user", "project"}:
+            score += 6
+        try:
+            score += min(int(md.get("importance") or 0), 10)
+        except Exception:
+            pass
+        try:
+            score += max(0.0, min(float(item.get("score") or 0.0), 1.0))
+        except Exception:
+            pass
+        return score
+
+    def _text_candidates(self, query: str, *, extra: Dict[str, Any], limit: int, include_private: bool) -> List[Dict[str, Any]]:
+        terms = self._query_terms(query)
+        if not terms or not self._db_url:
+            return []
+        try:
+            import psycopg
+            from psycopg.rows import dict_row
+        except Exception as e:
+            logger.debug("supabase_mem0 text candidate search unavailable: %s", e)
+            return []
+        schema = os.environ.get("SUPABASE_BRAIN_SCHEMA") or "vecs"
+        table = f'{schema}."{self._collection}"'
+        clauses = ["metadata->>'user_id' = %s"]
+        params: List[Any] = [self._user_id]
+        term_clauses = []
+        for term in terms:
+            term_clauses.append("(coalesce(metadata->>'data','') ilike %s or metadata::text ilike %s)")
+            pattern = f"%{term}%"
+            params.extend([pattern, pattern])
+        clauses.append("(" + " or ".join(term_clauses) + ")")
+        for key in ("category", "scope", "visibility", "project_id"):
+            if extra.get(key):
+                clauses.append(f"metadata->>'{key}' = %s")
+                params.append(extra[key])
+        if not include_private:
+            clauses.append("(metadata->>'visibility' = 'shared' or metadata->>'scope' in ('shared','user') or coalesce(metadata->>'owner_agent_id', metadata->>'agent_id', metadata->>'created_by_agent', %s) = %s)")
+            params.extend([self._agent_id, self._agent_id])
+        clauses.append("not (coalesce((metadata->>'archived')::boolean, false) or metadata ? 'archived_at')")
+        params.append(max(limit, 1))
+        sql = f"""
+            select id, metadata from {table}
+            where {' and '.join(clauses)}
+            order by coalesce((metadata->>'importance')::int, 0) desc,
+                     coalesce(metadata->>'updated_at', metadata->>'created_at') desc nulls last
+            limit %s
+        """
+        try:
+            with psycopg.connect(self._db_url, row_factory=dict_row) as conn, conn.cursor() as cur:
+                cur.execute(sql, params)
+                rows = cur.fetchall()
+        except Exception as e:
+            logger.debug("supabase_mem0 text candidate search failed: %s", e)
+            return []
+        out = []
+        for row in rows:
+            md = row.get("metadata") or {}
+            out.append({"id": row.get("id"), "memory": md.get("data") or "", "data": md.get("data"), "metadata": md, "source_modes": ["text"]})
+        return out
 
     @staticmethod
     def _results(response: Any) -> List[Dict[str, Any]]:
@@ -369,23 +490,48 @@ class SupabaseMem0MemoryProvider(MemoryProvider):
             top_k = max(1, min(int(args.get("top_k") or 5), 20))
             extra = {k: args.get(k) for k in ("category", "scope", "visibility", "project_id") if args.get(k)}
             include_private = bool(args.get("include_private"))
+            terms = self._query_terms(query)
+            candidates: Dict[str, Dict[str, Any]] = {}
+            semantic_error: Optional[str] = None
             try:
-                response = mem.search(query=query, filters=self._filters(extra), top_k=min(top_k * 4, 50))
-                items = []
+                response = mem.search(query=query, filters=self._filters(extra), top_k=min(top_k * 6, 50))
                 for r in self._results(response):
                     metadata = r.get("metadata") or {}
                     if not include_private and not self._visible_to_this_agent(metadata):
                         continue
-                    items.append({
+                    mid = str(r.get("id") or metadata.get("id") or metadata.get("data") or len(candidates))
+                    candidates[mid] = {
                         "memory": r.get("memory") or r.get("text") or "",
                         "score": r.get("score"),
                         "metadata": metadata,
-                    })
-                    if len(items) >= top_k:
-                        break
-                return json.dumps({"results": items, "count": len(items), "agent_id": self._agent_id})
+                        "source_modes": ["semantic"],
+                    }
             except Exception as e:
-                return tool_error(f"brain_search failed: {e}")
+                semantic_error = str(e)
+
+            for row in self._text_candidates(query, extra=extra, limit=min(top_k * 8, 80), include_private=include_private):
+                mid = str(row.get("id"))
+                existing = candidates.get(mid)
+                if existing:
+                    existing.setdefault("source_modes", ["semantic"]).append("text")
+                    existing.setdefault("data", row.get("data"))
+                else:
+                    candidates[mid] = row
+
+            if not candidates and semantic_error:
+                return tool_error(f"brain_search failed: {semantic_error}")
+            items = list(candidates.values())
+            for item in items:
+                item["hybrid_score"] = self._hybrid_rank(item, query, terms)
+            items.sort(key=lambda item: item.get("hybrid_score", 0), reverse=True)
+            items = items[:top_k]
+            return json.dumps({
+                "results": items,
+                "count": len(items),
+                "agent_id": self._agent_id,
+                "mode": "hybrid" if any("text" in item.get("source_modes", []) for item in items) else "semantic",
+                **({"semantic_error": semantic_error} if semantic_error else {}),
+            })
 
         if tool_name == "brain_remember":
             text = str(args.get("memory") or "").strip()
@@ -399,6 +545,9 @@ class SupabaseMem0MemoryProvider(MemoryProvider):
                 visibility=args.get("visibility"),
                 project_id=args.get("project_id"),
                 owner_agent_id=args.get("owner_agent_id"),
+                main_agent_id=args.get("main_agent_id"),
+                subagent_profile_id=args.get("subagent_profile_id"),
+                subject_agent_id=args.get("subject_agent_id"),
             )
             try:
                 mem.add(

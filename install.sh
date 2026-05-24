@@ -55,7 +55,7 @@ else
     mkdir -p "$VENDOR_DIR"
     PYTHON=$(command -v python3 || command -v python)
     "$PYTHON" -m pip install \
-        --quiet --target "$VENDOR_DIR" --no-deps \
+        --quiet --target "$VENDOR_DIR" \
         "mem0ai==2.0.2" "vecs==0.4.5" "psycopg[binary]" 2>&1 | tail -3
     done_ "Vendor deps installed"
 fi

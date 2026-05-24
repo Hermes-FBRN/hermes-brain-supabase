@@ -20,7 +20,7 @@ SUPABASE_BRAIN_DEFAULT_SCOPE="agent"
 SUPABASE_BRAIN_DEFAULT_VISIBILITY="private"
 ```
 
-For multi-agent deployments, keep the same `SUPABASE_BRAIN_COLLECTION` and set a unique `SUPABASE_BRAIN_AGENT_ID` for each agent.
+For multi-agent deployments, keep the same `SUPABASE_BRAIN_COLLECTION` and set a unique `SUPABASE_BRAIN_AGENT_ID` for each independent main agent. Do not use subagent/profile names as main-agent IDs.
 
 ## Governance metadata
 
@@ -32,6 +32,9 @@ Every explicit `brain_remember` write includes:
   "agent_id": "...",
   "created_by_agent": "...",
   "owner_agent_id": "...",
+  "main_agent_id": "...",
+  "subagent_profile_id": "optional internal profile, e.g. claude-code-agent or codex-agent",
+  "subject_agent_id": "optional agent/profile the memory is about",
   "scope": "agent | shared | user | project",
   "visibility": "private | shared | restricted",
   "project_id": "optional-project-id",
@@ -45,6 +48,7 @@ Defaults:
 - `scope=agent`
 - `visibility=private`
 - `owner_agent_id=$SUPABASE_BRAIN_AGENT_ID`
+- `main_agent_id=$SUPABASE_BRAIN_AGENT_ID`
 
 Use `scope=shared, visibility=shared` for memories that should be available to all trusted agents sharing the same user/collection.
 
