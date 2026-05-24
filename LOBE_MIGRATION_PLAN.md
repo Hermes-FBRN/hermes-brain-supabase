@@ -5,7 +5,7 @@ This plan formalizes the Brain as isolated but optionally connected sectors/lobe
 ## Mental model
 
 - **Brain**: the whole Supabase/Mem0 memory system.
-- **Lobe / sector**: a top-level memory area, identified by `lobe_id` and mirrored to `workspace_id` / legacy Mem0 `user_id` for compatibility.
+- **Lobe / sector**: a top-level memory area, identified by `lobe_id`. The Mem0 backend still requires its internal tenant key `user_id`, so migration code mirrors `lobe_id` to legacy `user_id` only where strictly required. `workspace_id` is deprecated and should not be written to new records.
 - **Project / category**: optional subdivision inside a lobe, usually represented by `project_id` and/or `category`.
 - **Human actor**: who asked for or authored the memory, represented by `created_by_user_id`, `created_by_username`, and `created_by_platform`.
 - **Agent actor**: the main agent that wrote or owns the memory, represented by `created_by_agent`, `main_agent_id`, and `owner_agent_id`.
@@ -49,7 +49,6 @@ This access list is enforced at the MCP layer with `SUPABASE_BRAIN_ALLOWED_LOBES
 ```json
 {
   "lobe_id": "nucleus",
-  "workspace_id": "nucleus",
   "user_id": "nucleus",
   "project_id": "optional-project-or-system-area",
   "category": "governance | infra | bootstrap | recovery | credentials-pointer",
@@ -69,7 +68,7 @@ This access list is enforced at the MCP layer with `SUPABASE_BRAIN_ALLOWED_LOBES
 ### Phase 0 — No DB rewrite
 
 - Add code aliases: prefer `SUPABASE_BRAIN_LOBE_ID`, accept `SUPABASE_BRAIN_WORKSPACE_ID`, keep `SUPABASE_BRAIN_USER_ID` as legacy.
-- New writes include `lobe_id`, `workspace_id`, and legacy `user_id` with the same lobe value.
+- New writes include canonical `lobe_id`; the provider passes the same value as legacy Mem0 `user_id` only because Mem0 requires a tenant key. Do not write `workspace_id` to new metadata unless a legacy record already has it.
 - Document `nucleus` and access policy.
 
 ### Phase 1 — Audit existing memories
@@ -95,10 +94,11 @@ For each approved nucleus row, set:
 ```json
 {
   "lobe_id": "nucleus",
-  "workspace_id": "nucleus",
   "user_id": "nucleus"
 }
 ```
+
+Do not add `workspace_id` during backfill; preserve it only if a legacy row already contains it and removing it would break an old client.
 
 If the human actor is known, add:
 
@@ -134,13 +134,13 @@ SUPABASE_BRAIN_LOBE_ID=nucleus
 SUPABASE_BRAIN_ALLOWED_LOBES=nucleus
 ```
 
-Accepted alias:
+Deprecated compatibility alias, accepted only for older configs:
 
 ```env
 SUPABASE_BRAIN_WORKSPACE_ID=nucleus
 ```
 
-Legacy compatibility only:
+Legacy Mem0 tenant compatibility only:
 
 ```env
 SUPABASE_BRAIN_USER_ID=nucleus

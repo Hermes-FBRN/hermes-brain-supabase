@@ -45,7 +45,7 @@ For multiple independent **main agents** sharing one Supabase brain, use the sam
 ```env
 SUPABASE_BRAIN_COLLECTION=hermes_brain
 SUPABASE_BRAIN_LOBE_ID=nucleus          # Brain sector/lobe namespace, not a human creator id
-# Aliases still accepted: SUPABASE_BRAIN_WORKSPACE_ID, then legacy SUPABASE_BRAIN_USER_ID
+# Deprecated aliases still accepted for old configs: SUPABASE_BRAIN_WORKSPACE_ID, then legacy SUPABASE_BRAIN_USER_ID
 SUPABASE_BRAIN_AGENT_ID=hermes-main        # main agent id; change per independent main agent
 SUPABASE_BRAIN_ALLOWED_LOBES=nucleus     # comma-separated lobes this deployment may access
 SUPABASE_BRAIN_DEFAULT_SCOPE=agent         # default: private to this agent
@@ -59,9 +59,8 @@ Each stored memory gets governance metadata:
 
 ```json
 {
-  "user_id": "nucleus",
-  "workspace_id": "nucleus",
   "lobe_id": "nucleus",
+  "user_id": "nucleus",
   "agent_id": "hermes-main",
   "created_by_agent": "hermes-main",
   "owner_agent_id": "hermes-main",
@@ -94,10 +93,10 @@ Supported visibility values:
 | Visibility | Meaning |
 |------------|---------|
 | `private` | Returned only to the owning/current agent by default |
-| `shared` | Returned to all trusted agents sharing the same workspace/collection |
+| `shared` | Returned to all trusted agents sharing the same lobe/collection |
 | `restricted` | Reserved for stricter future policy / explicit admin workflows |
 
-Search defaults to shared/user memories in the current lobe/workspace plus private memories owned by the current main agent. Admin tools can pass `include_private=true` when needed. Use `subagent_profile_id` only when a main agent writes/reads on behalf of one of its internal profiles. For Hermes, profile names should be written explicitly as `claude-code-agent` and `codex-agent` to avoid confusing them with independent peer main agents.
+Search defaults to shared/user memories in the current lobe plus private memories owned by the current main agent. Admin tools can pass `include_private=true` when needed. Use `subagent_profile_id` only when a main agent writes/reads on behalf of one of its internal profiles. For Hermes, profile names should be written explicitly as `claude-code-agent` and `codex-agent` to avoid confusing them with independent peer main agents.
 
 ## Lobe access policy
 

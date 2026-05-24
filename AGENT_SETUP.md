@@ -64,7 +64,7 @@ SUPABASE_BRAIN_DB_URL=postgresql://...
 OPENAI_API_KEY=...
 SUPABASE_BRAIN_COLLECTION=hermes_brain
 SUPABASE_BRAIN_LOBE_ID=nucleus
-# Aliases still accepted, but prefer LOBE_ID:
+# Deprecated aliases still accepted for old configs, but prefer LOBE_ID:
 # SUPABASE_BRAIN_WORKSPACE_ID=nucleus
 # SUPABASE_BRAIN_USER_ID=nucleus
 SUPABASE_BRAIN_AGENT_ID=<new-main-agent-id>
@@ -191,7 +191,6 @@ Per una memoria riferita a un profilo interno:
   "visibility": "private",
   "project_id": "hermes-fbrn",
   "lobe_id": "nucleus",
-  "workspace_id": "nucleus",
   "created_by_user_id": "optional-human/platform-id",
   "created_by_username": "optional-name",
   "created_by_platform": "optional-platform",
@@ -212,7 +211,7 @@ owner_agent_id main_agent_id subagent_profile_id shared durable memory layer
 
 Atteso:
 
-- risultati `shared`, `user` e `project` visibili dentro lo stesso `lobe_id`/workspace;
+- risultati `shared`, `user` e `project` visibili dentro lo stesso `lobe_id`;
 - memorie private visibili solo se `owner_agent_id` corrisponde al main agent corrente;
 - record governance in alto grazie al ranking ibrido semantico + testuale.
 

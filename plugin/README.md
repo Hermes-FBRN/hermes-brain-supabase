@@ -15,14 +15,14 @@ OPENAI_API_KEY="sk-..."
 SUPABASE_BRAIN_COLLECTION="hermes_brain"
 SUPABASE_BRAIN_AUTO_SYNC="false"
 SUPABASE_BRAIN_LOBE_ID="nucleus"
-# Aliases still accepted: SUPABASE_BRAIN_WORKSPACE_ID="nucleus", SUPABASE_BRAIN_USER_ID="nucleus"
+# Deprecated aliases still accepted for old configs: SUPABASE_BRAIN_WORKSPACE_ID="nucleus", SUPABASE_BRAIN_USER_ID="nucleus"
 SUPABASE_BRAIN_AGENT_ID="hermes"
 SUPABASE_BRAIN_ALLOWED_LOBES="nucleus"
 SUPABASE_BRAIN_DEFAULT_SCOPE="agent"
 SUPABASE_BRAIN_DEFAULT_VISIBILITY="private"
 ```
 
-For multi-agent deployments, keep the same `SUPABASE_BRAIN_COLLECTION`, put agents that should share a memory lobe in the same `SUPABASE_BRAIN_LOBE_ID`, set `SUPABASE_BRAIN_ALLOWED_LOBES` to the lobes that deployment may access, and set a unique `SUPABASE_BRAIN_AGENT_ID` for each independent main agent. Do not use subagent/profile names as main-agent IDs. `SUPABASE_BRAIN_USER_ID` is a legacy alias for the lobe/workspace id, not the human creator.
+For multi-agent deployments, keep the same `SUPABASE_BRAIN_COLLECTION`, put agents that should share a memory lobe in the same `SUPABASE_BRAIN_LOBE_ID`, set `SUPABASE_BRAIN_ALLOWED_LOBES` to the lobes that deployment may access, and set a unique `SUPABASE_BRAIN_AGENT_ID` for each independent main agent. Do not use subagent/profile names as main-agent IDs. `SUPABASE_BRAIN_USER_ID` is a legacy alias for the lobe id, not the human creator.
 
 ## Governance metadata
 
@@ -30,9 +30,8 @@ Every explicit `brain_remember` write includes:
 
 ```json
 {
-  "user_id": "... legacy Mem0 tenant key; same value as workspace_id",
-  "workspace_id": "... alias for lobe_id",
   "lobe_id": "... Brain sector/lobe",
+  "user_id": "... legacy Mem0 tenant key; same value as lobe_id",
   "agent_id": "...",
   "created_by_agent": "...",
   "owner_agent_id": "...",
@@ -57,7 +56,7 @@ Defaults:
 - `owner_agent_id=$SUPABASE_BRAIN_AGENT_ID`
 - `main_agent_id=$SUPABASE_BRAIN_AGENT_ID`
 
-Use `scope=shared, visibility=shared` for memories that should be available to all trusted agents sharing the same lobe/workspace/collection.
+Use `scope=shared, visibility=shared` for memories that should be available to all trusted agents sharing the same lobe/collection.
 
 Use `scope=project, project_id=<project>, visibility=shared` for project-level knowledge.
 

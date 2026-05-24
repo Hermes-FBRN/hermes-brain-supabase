@@ -59,8 +59,7 @@ COLLECTION = os.environ.get("SUPABASE_BRAIN_COLLECTION") or "hermes_brain"
 BRAIN_SCHEMA = os.environ.get("SUPABASE_BRAIN_SCHEMA") or "vecs"
 BRAIN_TABLE = f'{BRAIN_SCHEMA}."{COLLECTION}"'
 DEFAULT_LOBE_ID = os.environ.get("SUPABASE_BRAIN_LOBE_ID") or os.environ.get("SUPABASE_BRAIN_WORKSPACE_ID") or os.environ.get("SUPABASE_BRAIN_USER_ID") or "nucleus"
-DEFAULT_WORKSPACE_ID = DEFAULT_LOBE_ID
-DEFAULT_USER_ID = DEFAULT_LOBE_ID  # legacy name used by Mem0/API filters; semantically lobe/workspace id
+DEFAULT_USER_ID = DEFAULT_LOBE_ID  # legacy Mem0 tenant key; semantically lobe_id
 DEFAULT_AGENT_ID = os.environ.get("SUPABASE_BRAIN_AGENT_ID") or "hermes"
 DEFAULT_ALLOWED_LOBES_RAW = os.environ.get("SUPABASE_BRAIN_ALLOWED_LOBES") or DEFAULT_LOBE_ID
 DEFAULT_ALLOWED_LOBES = {x.strip() for x in DEFAULT_ALLOWED_LOBES_RAW.split(",") if x.strip()}
@@ -137,7 +136,6 @@ def _sanitize_row(row: Dict[str, Any], include_vector: bool = False) -> Dict[str
         "category": md.get("category"),
         "importance": md.get("importance"),
         "user_id": md.get("user_id"),
-        "workspace_id": md.get("workspace_id") or md.get("user_id"),
         "lobe_id": md.get("lobe_id") or md.get("workspace_id") or md.get("user_id"),
         "agent_id": md.get("agent_id"),
         "created_by_agent": md.get("created_by_agent"),
@@ -182,9 +180,8 @@ def _build_memory_metadata(
         "category": category or "general",
         "importance": max(0, min(int(importance or 0), 10)),
         "source": source,
-        "user_id": user_id,  # legacy Mem0 tenant key; semantically this is the Brain workspace/lobe id
-        "workspace_id": user_id,
         "lobe_id": user_id,
+        "user_id": user_id,  # legacy Mem0 tenant key required by Mem0; semantically the same as lobe_id
         "agent_id": agent_id,
         "created_by_agent": agent_id,
         "owner_agent_id": _text(owner_agent_id) or _text(main_agent_id) or agent_id,
@@ -552,7 +549,7 @@ def brain_remember(memory: str, category: str = "general", importance: int = 5, 
 @mcp.tool()
 def brain_update_metadata(memory_id: str, category: Optional[str] = None, importance: Optional[int] = None, extra_metadata_json: Optional[str] = None, actor: str = "mcp_brain_manager") -> Dict[str, Any]:
     """Safely update selected metadata fields. Does not edit vector/content."""
-    allowed_extra = {"source", "agent_id", "created_by_agent", "owner_agent_id", "main_agent_id", "subagent_profile_id", "subject_agent_id", "scope", "visibility", "project_id", "user_id", "workspace_id", "lobe_id", "created_by_user_id", "created_by_username", "created_by_platform", "note", "tags", "reviewed", "quality", "provenance"}
+    allowed_extra = {"source", "agent_id", "created_by_agent", "owner_agent_id", "main_agent_id", "subagent_profile_id", "subject_agent_id", "scope", "visibility", "project_id", "user_id", "lobe_id", "created_by_user_id", "created_by_username", "created_by_platform", "note", "tags", "reviewed", "quality", "provenance"}
     with _connect() as conn, conn.cursor() as cur:
         cur.execute(f"select metadata from {BRAIN_TABLE} where id = %s for update", (memory_id,))
         row = cur.fetchone()

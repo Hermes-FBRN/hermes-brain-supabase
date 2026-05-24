@@ -188,7 +188,7 @@ class SupabaseMem0MemoryProvider(MemoryProvider):
             {"key": "openai_api_key", "description": "OpenAI key used by Mem0 for extraction/embeddings", "secret": True, "required": True, "env_var": "OPENAI_API_KEY"},
             {"key": "collection", "description": "Supabase/vecs collection name", "default": "hermes_brain"},
             {"key": "lobe_id", "description": "Brain sector/lobe namespace written to metadata", "default": "nucleus", "env_var": "SUPABASE_BRAIN_LOBE_ID"},
-            {"key": "workspace_id", "description": "Alias for lobe_id / Brain workspace namespace", "default": "nucleus", "env_var": "SUPABASE_BRAIN_WORKSPACE_ID"},
+            {"key": "workspace_id", "description": "Deprecated alias accepted only for older configs; prefer lobe_id", "default": "", "env_var": "SUPABASE_BRAIN_WORKSPACE_ID"},
             {"key": "user_id", "description": "Legacy alias for lobe_id; prefer SUPABASE_BRAIN_LOBE_ID", "default": "nucleus", "env_var": "SUPABASE_BRAIN_USER_ID"},
             {"key": "agent_id", "description": "Stable ID of this Hermes agent", "default": "hermes", "env_var": "SUPABASE_BRAIN_AGENT_ID"},
             {"key": "allowed_lobes", "description": "Comma-separated lobes this deployment may access", "default": "nucleus", "env_var": "SUPABASE_BRAIN_ALLOWED_LOBES"},
@@ -291,9 +291,8 @@ class SupabaseMem0MemoryProvider(MemoryProvider):
             "source": source,
             "category": category or "memory",
             "importance": importance,
-            "user_id": self._user_id,  # legacy Mem0 tenant key; semantically this is the Brain workspace/lobe id
-            "workspace_id": self._user_id,
             "lobe_id": self._user_id,
+            "user_id": self._user_id,  # legacy Mem0 tenant key required by Mem0; semantically the same as lobe_id
             "agent_id": self._agent_id,
             "created_by_agent": self._agent_id,
             "owner_agent_id": _clean_text(owner_agent_id) or _clean_text(main_agent_id) or self._agent_id,
