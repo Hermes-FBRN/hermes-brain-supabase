@@ -44,18 +44,23 @@ For multiple independent **main agents** sharing one Supabase brain, use the sam
 
 ```env
 SUPABASE_BRAIN_COLLECTION=hermes_brain
-SUPABASE_BRAIN_USER_ID=462939789210157056
+SUPABASE_BRAIN_LOBE_ID=nucleus          # Brain sector/lobe namespace, not a human creator id
+# Aliases still accepted: SUPABASE_BRAIN_WORKSPACE_ID, then legacy SUPABASE_BRAIN_USER_ID
 SUPABASE_BRAIN_AGENT_ID=hermes-main        # main agent id; change per independent main agent
 SUPABASE_BRAIN_DEFAULT_SCOPE=agent         # default: private to this agent
 SUPABASE_BRAIN_DEFAULT_VISIBILITY=private  # default: not shown to other agents
 SUPABASE_BRAIN_AUTO_SYNC=false             # recommended
 ```
 
+Think of `SUPABASE_BRAIN_LOBE_ID` as the Brain lobe/sector. It isolates an area of memory such as `nucleus`, `client-x`, or `fabeeo-personal`; it is not the human who created the memory. `nucleus` is the first lobe: the vital operational core for survival, cloning, and environment restoration of trusted main agents. For attribution, store actor metadata such as `created_by_user_id`, `created_by_username`, and `created_by_platform` when available.
+
 Each stored memory gets governance metadata:
 
 ```json
 {
-  "user_id": "462939789210157056",
+  "user_id": "nucleus",
+  "workspace_id": "nucleus",
+  "lobe_id": "nucleus",
   "agent_id": "hermes-main",
   "created_by_agent": "hermes-main",
   "owner_agent_id": "hermes-main",
@@ -65,6 +70,9 @@ Each stored memory gets governance metadata:
   "scope": "agent",
   "visibility": "private",
   "project_id": "optional-project-name",
+  "created_by_user_id": "optional-human/platform-id",
+  "created_by_username": "optional-human-readable-name",
+  "created_by_platform": "optional-platform",
   "category": "infra",
   "importance": 8,
   "source": "hermes_brain_remember"
@@ -85,10 +93,16 @@ Supported visibility values:
 | Visibility | Meaning |
 |------------|---------|
 | `private` | Returned only to the owning/current agent by default |
-| `shared` | Returned to all trusted agents sharing the same user/collection |
+| `shared` | Returned to all trusted agents sharing the same workspace/collection |
 | `restricted` | Reserved for stricter future policy / explicit admin workflows |
 
-Search defaults to shared/user memories plus private memories owned by the current main agent. Admin tools can pass `include_private=true` when needed. Use `subagent_profile_id` only when a main agent writes/reads on behalf of one of its internal profiles. For Hermes, profile names should be written explicitly as `claude-code-agent` and `codex-agent` to avoid confusing them with independent peer main agents.
+Search defaults to shared/user memories in the current lobe/workspace plus private memories owned by the current main agent. Admin tools can pass `include_private=true` when needed. Use `subagent_profile_id` only when a main agent writes/reads on behalf of one of its internal profiles. For Hermes, profile names should be written explicitly as `claude-code-agent` and `codex-agent` to avoid confusing them with independent peer main agents.
+
+## Lobe access policy
+
+Access policy should be enforced by governance/retrieval rules. For the initial `nucleus` lobe, trusted main agents are `hermes-main`, `seraph-main`, and `smith-main`; an unrelated example agent such as `mario-main` should not receive broad `nucleus` access unless explicitly granted.
+
+See `LOBE_MIGRATION_PLAN.md` before migrating existing memories.
 
 ## Brain Manager MCP setup
 

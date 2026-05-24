@@ -57,13 +57,16 @@ Trova il path env corretto:
 hermes config env-path
 ```
 
-Aggiungi i valori, adattando `SUPABASE_BRAIN_AGENT_ID` al nuovo main agent:
+Aggiungi i valori, adattando `SUPABASE_BRAIN_LOBE_ID` al lobo/area del Brain e `SUPABASE_BRAIN_AGENT_ID` al nuovo main agent:
 
 ```env
 SUPABASE_BRAIN_DB_URL=postgresql://...
 OPENAI_API_KEY=...
 SUPABASE_BRAIN_COLLECTION=hermes_brain
-SUPABASE_BRAIN_USER_ID=462939789210157056
+SUPABASE_BRAIN_LOBE_ID=nucleus
+# Aliases still accepted, but prefer LOBE_ID:
+# SUPABASE_BRAIN_WORKSPACE_ID=nucleus
+# SUPABASE_BRAIN_USER_ID=nucleus
 SUPABASE_BRAIN_AGENT_ID=<new-main-agent-id>
 SUPABASE_BRAIN_DEFAULT_SCOPE=agent
 SUPABASE_BRAIN_DEFAULT_VISIBILITY=private
@@ -75,6 +78,8 @@ Esempio:
 ```env
 SUPABASE_BRAIN_AGENT_ID=research-main
 ```
+
+Nota: `SUPABASE_BRAIN_LOBE_ID` è il namespace/lobo del Brain, non l’utente umano creatore. Per tracciare l’attore umano usa metadata come `created_by_user_id`, `created_by_username` e `created_by_platform` quando disponibili.
 
 ## 4. Installa plugin e MCP
 
@@ -171,7 +176,7 @@ Nota: la shell potrebbe non caricare `$HERMES_HOME/.env`; Hermes lo carica inter
 Dal nuovo main agent, salva una memoria non sensibile:
 
 ```text
-Store this durable Brain test: "<new-main-agent-id> can access the shared Hermes/FBRN Brain." category=governance importance=5 scope=agent visibility=private project_id=hermes-fbrn
+Store this durable Brain test: "<new-main-agent-id> can access the shared Hermes/FBRN Brain lobe." category=governance importance=5 scope=agent visibility=private project_id=hermes-fbrn lobe_id=nucleus
 ```
 
 Per una memoria riferita a un profilo interno:
@@ -184,6 +189,11 @@ Per una memoria riferita a un profilo interno:
   "scope": "agent",
   "visibility": "private",
   "project_id": "hermes-fbrn",
+  "lobe_id": "nucleus",
+  "workspace_id": "nucleus",
+  "created_by_user_id": "optional-human/platform-id",
+  "created_by_username": "optional-name",
+  "created_by_platform": "optional-platform",
   "owner_agent_id": "<new-main-agent-id>",
   "main_agent_id": "<new-main-agent-id>",
   "subagent_profile_id": "worker-a",
@@ -201,7 +211,7 @@ owner_agent_id main_agent_id subagent_profile_id shared durable memory layer
 
 Atteso:
 
-- risultati `shared`, `user` e `project` visibili;
+- risultati `shared`, `user` e `project` visibili dentro lo stesso `lobe_id`/workspace;
 - memorie private visibili solo se `owner_agent_id` corrisponde al main agent corrente;
 - record governance in alto grazie al ranking ibrido semantico + testuale.
 

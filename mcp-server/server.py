@@ -58,7 +58,9 @@ DB_URL = os.environ.get("SUPABASE_BRAIN_DB_URL")
 COLLECTION = os.environ.get("SUPABASE_BRAIN_COLLECTION") or "hermes_brain"
 BRAIN_SCHEMA = os.environ.get("SUPABASE_BRAIN_SCHEMA") or "vecs"
 BRAIN_TABLE = f'{BRAIN_SCHEMA}."{COLLECTION}"'
-DEFAULT_USER_ID = os.environ.get("SUPABASE_BRAIN_USER_ID") or "hermes-user"
+DEFAULT_LOBE_ID = os.environ.get("SUPABASE_BRAIN_LOBE_ID") or os.environ.get("SUPABASE_BRAIN_WORKSPACE_ID") or os.environ.get("SUPABASE_BRAIN_USER_ID") or "nucleus"
+DEFAULT_WORKSPACE_ID = DEFAULT_LOBE_ID
+DEFAULT_USER_ID = DEFAULT_LOBE_ID  # legacy name used by Mem0/API filters; semantically lobe/workspace id
 DEFAULT_AGENT_ID = os.environ.get("SUPABASE_BRAIN_AGENT_ID") or "hermes"
 DEFAULT_SCOPE = os.environ.get("SUPABASE_BRAIN_DEFAULT_SCOPE") or "agent"
 DEFAULT_VISIBILITY = os.environ.get("SUPABASE_BRAIN_DEFAULT_VISIBILITY") or "private"
@@ -125,6 +127,8 @@ def _sanitize_row(row: Dict[str, Any], include_vector: bool = False) -> Dict[str
         "category": md.get("category"),
         "importance": md.get("importance"),
         "user_id": md.get("user_id"),
+        "workspace_id": md.get("workspace_id") or md.get("user_id"),
+        "lobe_id": md.get("lobe_id") or md.get("workspace_id") or md.get("user_id"),
         "agent_id": md.get("agent_id"),
         "created_by_agent": md.get("created_by_agent"),
         "owner_agent_id": md.get("owner_agent_id"),
@@ -168,7 +172,9 @@ def _build_memory_metadata(
         "category": category or "general",
         "importance": max(0, min(int(importance or 0), 10)),
         "source": source,
-        "user_id": user_id,
+        "user_id": user_id,  # legacy Mem0 tenant key; semantically this is the Brain workspace/lobe id
+        "workspace_id": user_id,
+        "lobe_id": user_id,
         "agent_id": agent_id,
         "created_by_agent": agent_id,
         "owner_agent_id": _text(owner_agent_id) or _text(main_agent_id) or agent_id,
@@ -342,10 +348,10 @@ def brain_health_check() -> Dict[str, Any]:
 
 
 @mcp.tool()
-def brain_search(query: str, top_k: int = 5, user_id: Optional[str] = None, agent_id: Optional[str] = None, scope: Optional[str] = None, visibility: Optional[str] = None, project_id: Optional[str] = None, include_private: bool = False, include_archived: bool = False) -> Dict[str, Any]:
+def brain_search(query: str, top_k: int = 5, lobe_id: Optional[str] = None, workspace_id: Optional[str] = None, user_id: Optional[str] = None, agent_id: Optional[str] = None, scope: Optional[str] = None, visibility: Optional[str] = None, project_id: Optional[str] = None, include_private: bool = False, include_archived: bool = False) -> Dict[str, Any]:
     """Hybrid search the brain: Mem0 semantic candidates + exact text/metadata anchors, reranked for governance terms."""
     top_k = max(1, min(int(top_k or 5), 20))
-    user_id = user_id or DEFAULT_USER_ID
+    user_id = lobe_id or workspace_id or user_id or DEFAULT_USER_ID
     agent_id = agent_id or DEFAULT_AGENT_ID
     filters = {"user_id": user_id}
     for key, value in (("scope", scope), ("visibility", visibility), ("project_id", project_id)):
@@ -421,9 +427,10 @@ def brain_search(query: str, top_k: int = 5, user_id: Optional[str] = None, agen
 
 
 @mcp.tool()
-def brain_text_search(query: str, limit: int = 10, user_id: Optional[str] = None, agent_id: Optional[str] = None, category: Optional[str] = None, scope: Optional[str] = None, visibility: Optional[str] = None, project_id: Optional[str] = None, include_private: bool = False, include_archived: bool = False) -> Dict[str, Any]:
+def brain_text_search(query: str, limit: int = 10, lobe_id: Optional[str] = None, workspace_id: Optional[str] = None, user_id: Optional[str] = None, agent_id: Optional[str] = None, category: Optional[str] = None, scope: Optional[str] = None, visibility: Optional[str] = None, project_id: Optional[str] = None, include_private: bool = False, include_archived: bool = False) -> Dict[str, Any]:
     """Admin text search over memory text/metadata; no embedding needed."""
     limit = max(1, min(int(limit or 10), 50))
+    user_id = lobe_id or workspace_id or user_id
     agent_id = agent_id or DEFAULT_AGENT_ID
     pattern = f"%{query}%"
     clauses = ["coalesce(metadata->>'data','') ilike %s"]
@@ -457,9 +464,9 @@ def brain_text_search(query: str, limit: int = 10, user_id: Optional[str] = None
 
 
 @mcp.tool()
-def brain_profile(user_id: Optional[str] = None, agent_id: Optional[str] = None, limit: int = 20, include_archived: bool = False) -> Dict[str, Any]:
+def brain_profile(lobe_id: Optional[str] = None, workspace_id: Optional[str] = None, user_id: Optional[str] = None, agent_id: Optional[str] = None, limit: int = 20, include_archived: bool = False) -> Dict[str, Any]:
     """Return a broad recent/high-importance profile slice for a user."""
-    user_id = user_id or DEFAULT_USER_ID
+    user_id = lobe_id or workspace_id or user_id or DEFAULT_USER_ID
     agent_id = agent_id or DEFAULT_AGENT_ID
     limit = max(1, min(int(limit or 20), 50))
     clauses = ["metadata->>'user_id' = %s", "(metadata->>'visibility' = 'shared' or metadata->>'scope' in ('shared','user') or coalesce(metadata->>'owner_agent_id', metadata->>'agent_id', metadata->>'created_by_agent', %s) = %s)"]
@@ -492,12 +499,12 @@ def brain_get_memory(memory_id: str) -> Dict[str, Any]:
 
 
 @mcp.tool()
-def brain_remember(memory: str, category: str = "general", importance: int = 5, user_id: Optional[str] = None, agent_id: Optional[str] = None, scope: Optional[str] = None, visibility: Optional[str] = None, project_id: Optional[str] = None, owner_agent_id: Optional[str] = None, main_agent_id: Optional[str] = None, subagent_profile_id: Optional[str] = None, subject_agent_id: Optional[str] = None) -> Dict[str, Any]:
+def brain_remember(memory: str, category: str = "general", importance: int = 5, lobe_id: Optional[str] = None, workspace_id: Optional[str] = None, user_id: Optional[str] = None, agent_id: Optional[str] = None, scope: Optional[str] = None, visibility: Optional[str] = None, project_id: Optional[str] = None, owner_agent_id: Optional[str] = None, main_agent_id: Optional[str] = None, subagent_profile_id: Optional[str] = None, subject_agent_id: Optional[str] = None, created_by_user_id: Optional[str] = None, created_by_username: Optional[str] = None, created_by_platform: Optional[str] = None) -> Dict[str, Any]:
     """Store an explicit durable fact through Mem0. Use only for curated facts, not raw transcripts."""
     if not memory or len(memory.strip()) < 3:
         return {"ok": False, "error": "memory text is required"}
     importance = max(0, min(int(importance or 0), 10))
-    user_id = user_id or DEFAULT_USER_ID
+    user_id = lobe_id or workspace_id or user_id or DEFAULT_USER_ID
     agent_id = agent_id or DEFAULT_AGENT_ID
     metadata = _build_memory_metadata(
         category=category,
@@ -513,6 +520,12 @@ def brain_remember(memory: str, category: str = "general", importance: int = 5, 
         subagent_profile_id=subagent_profile_id,
         subject_agent_id=subject_agent_id,
     )
+    if created_by_user_id:
+        metadata["created_by_user_id"] = created_by_user_id
+    if created_by_username:
+        metadata["created_by_username"] = created_by_username
+    if created_by_platform:
+        metadata["created_by_platform"] = created_by_platform
     engine = _memory_engine()
     raw = engine.add([{"role": "user", "content": memory}], user_id=user_id, metadata=metadata)
     return {"ok": True, "user_id": user_id, "agent_id": agent_id, "metadata": metadata, "result": raw}
@@ -521,7 +534,7 @@ def brain_remember(memory: str, category: str = "general", importance: int = 5, 
 @mcp.tool()
 def brain_update_metadata(memory_id: str, category: Optional[str] = None, importance: Optional[int] = None, extra_metadata_json: Optional[str] = None, actor: str = "mcp_brain_manager") -> Dict[str, Any]:
     """Safely update selected metadata fields. Does not edit vector/content."""
-    allowed_extra = {"source", "agent_id", "created_by_agent", "owner_agent_id", "main_agent_id", "subagent_profile_id", "subject_agent_id", "scope", "visibility", "project_id", "user_id", "note", "tags", "reviewed", "quality", "provenance"}
+    allowed_extra = {"source", "agent_id", "created_by_agent", "owner_agent_id", "main_agent_id", "subagent_profile_id", "subject_agent_id", "scope", "visibility", "project_id", "user_id", "workspace_id", "lobe_id", "created_by_user_id", "created_by_username", "created_by_platform", "note", "tags", "reviewed", "quality", "provenance"}
     with _connect() as conn, conn.cursor() as cur:
         cur.execute(f"select metadata from {BRAIN_TABLE} where id = %s for update", (memory_id,))
         row = cur.fetchone()

@@ -157,7 +157,7 @@ class SupabaseMem0MemoryProvider(MemoryProvider):
         self._sync_thread = None
         self._db_url = ""
         self._collection = "hermes_brain"
-        self._user_id = "hermes-user"
+        self._user_id = "hermes-workspace"
         self._agent_id = "hermes"
         self._auto_sync = False
         self._default_scope = "agent"
@@ -187,7 +187,9 @@ class SupabaseMem0MemoryProvider(MemoryProvider):
             {"key": "db_url", "description": "Supabase Postgres connection string", "secret": True, "required": True, "env_var": "SUPABASE_BRAIN_DB_URL"},
             {"key": "openai_api_key", "description": "OpenAI key used by Mem0 for extraction/embeddings", "secret": True, "required": True, "env_var": "OPENAI_API_KEY"},
             {"key": "collection", "description": "Supabase/vecs collection name", "default": "hermes_brain"},
-            {"key": "user_id", "description": "Tenant/user scope written to metadata", "default": "hermes-user", "env_var": "SUPABASE_BRAIN_USER_ID"},
+            {"key": "lobe_id", "description": "Brain sector/lobe namespace written to metadata", "default": "nucleus", "env_var": "SUPABASE_BRAIN_LOBE_ID"},
+            {"key": "workspace_id", "description": "Alias for lobe_id / Brain workspace namespace", "default": "nucleus", "env_var": "SUPABASE_BRAIN_WORKSPACE_ID"},
+            {"key": "user_id", "description": "Legacy alias for lobe_id; prefer SUPABASE_BRAIN_LOBE_ID", "default": "nucleus", "env_var": "SUPABASE_BRAIN_USER_ID"},
             {"key": "agent_id", "description": "Stable ID of this Hermes agent", "default": "hermes", "env_var": "SUPABASE_BRAIN_AGENT_ID"},
             {"key": "default_scope", "description": "Default scope for brain_remember", "default": "agent", "choices": ["agent", "shared", "user", "project"]},
             {"key": "default_visibility", "description": "Default visibility for brain_remember", "default": "private", "choices": ["private", "shared", "restricted"]},
@@ -211,7 +213,18 @@ class SupabaseMem0MemoryProvider(MemoryProvider):
         cfg = _load_json_config()
         self._db_url = os.environ.get("SUPABASE_BRAIN_DB_URL", "")
         self._collection = os.environ.get("SUPABASE_BRAIN_COLLECTION") or cfg.get("collection") or "hermes_brain"
-        self._user_id = kwargs.get("user_id") or os.environ.get("SUPABASE_BRAIN_USER_ID") or cfg.get("user_id") or "hermes-user"
+        self._user_id = (
+            kwargs.get("lobe_id")
+            or kwargs.get("workspace_id")
+            or kwargs.get("user_id")
+            or os.environ.get("SUPABASE_BRAIN_LOBE_ID")
+            or os.environ.get("SUPABASE_BRAIN_WORKSPACE_ID")
+            or os.environ.get("SUPABASE_BRAIN_USER_ID")
+            or cfg.get("lobe_id")
+            or cfg.get("workspace_id")
+            or cfg.get("user_id")
+            or "nucleus"
+        )
         self._agent_id = os.environ.get("SUPABASE_BRAIN_AGENT_ID") or cfg.get("agent_id") or "hermes"
         self._default_scope = _clean_choice(os.environ.get("SUPABASE_BRAIN_DEFAULT_SCOPE") or cfg.get("default_scope"), _ALLOWED_SCOPES, "agent")
         self._default_visibility = _clean_choice(os.environ.get("SUPABASE_BRAIN_DEFAULT_VISIBILITY") or cfg.get("default_visibility"), _ALLOWED_VISIBILITIES, "private")
@@ -277,7 +290,9 @@ class SupabaseMem0MemoryProvider(MemoryProvider):
             "source": source,
             "category": category or "memory",
             "importance": importance,
-            "user_id": self._user_id,
+            "user_id": self._user_id,  # legacy Mem0 tenant key; semantically this is the Brain workspace/lobe id
+            "workspace_id": self._user_id,
+            "lobe_id": self._user_id,
             "agent_id": self._agent_id,
             "created_by_agent": self._agent_id,
             "owner_agent_id": _clean_text(owner_agent_id) or _clean_text(main_agent_id) or self._agent_id,
@@ -416,7 +431,7 @@ class SupabaseMem0MemoryProvider(MemoryProvider):
     def system_prompt_block(self) -> str:
         return (
             "# Supabase Brain Memory\n"
-            f"Active provider: supabase_mem0. User scope: {self._user_id}. Agent: {self._agent_id}. Collection: {self._collection}.\n"
+            f"Active provider: supabase_mem0. Lobe/workspace: {self._user_id}. Agent: {self._agent_id}. Collection: {self._collection}.\n"
             "Use brain_search for recall and brain_remember only for explicit durable facts. "
             "Do not store temporary progress or secrets."
         )

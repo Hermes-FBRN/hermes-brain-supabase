@@ -14,13 +14,14 @@ OPENAI_API_KEY="sk-..."
 ```env
 SUPABASE_BRAIN_COLLECTION="hermes_brain"
 SUPABASE_BRAIN_AUTO_SYNC="false"
-SUPABASE_BRAIN_USER_ID="hermes-user"
+SUPABASE_BRAIN_LOBE_ID="nucleus"
+# Aliases still accepted: SUPABASE_BRAIN_WORKSPACE_ID="nucleus", SUPABASE_BRAIN_USER_ID="nucleus"
 SUPABASE_BRAIN_AGENT_ID="hermes"
 SUPABASE_BRAIN_DEFAULT_SCOPE="agent"
 SUPABASE_BRAIN_DEFAULT_VISIBILITY="private"
 ```
 
-For multi-agent deployments, keep the same `SUPABASE_BRAIN_COLLECTION` and set a unique `SUPABASE_BRAIN_AGENT_ID` for each independent main agent. Do not use subagent/profile names as main-agent IDs.
+For multi-agent deployments, keep the same `SUPABASE_BRAIN_COLLECTION`, put agents that should share a memory lobe in the same `SUPABASE_BRAIN_LOBE_ID`, and set a unique `SUPABASE_BRAIN_AGENT_ID` for each independent main agent. Do not use subagent/profile names as main-agent IDs. `SUPABASE_BRAIN_USER_ID` is a legacy alias for the lobe/workspace id, not the human creator.
 
 ## Governance metadata
 
@@ -28,7 +29,9 @@ Every explicit `brain_remember` write includes:
 
 ```json
 {
-  "user_id": "...",
+  "user_id": "... legacy Mem0 tenant key; same value as workspace_id",
+  "workspace_id": "... alias for lobe_id",
+  "lobe_id": "... Brain sector/lobe",
   "agent_id": "...",
   "created_by_agent": "...",
   "owner_agent_id": "...",
@@ -38,6 +41,9 @@ Every explicit `brain_remember` write includes:
   "scope": "agent | shared | user | project",
   "visibility": "private | shared | restricted",
   "project_id": "optional-project-id",
+  "created_by_user_id": "optional human/platform id",
+  "created_by_username": "optional human-readable name",
+  "created_by_platform": "optional platform",
   "category": "...",
   "importance": 1
 }
@@ -50,7 +56,7 @@ Defaults:
 - `owner_agent_id=$SUPABASE_BRAIN_AGENT_ID`
 - `main_agent_id=$SUPABASE_BRAIN_AGENT_ID`
 
-Use `scope=shared, visibility=shared` for memories that should be available to all trusted agents sharing the same user/collection.
+Use `scope=shared, visibility=shared` for memories that should be available to all trusted agents sharing the same lobe/workspace/collection.
 
 Use `scope=project, project_id=<project>, visibility=shared` for project-level knowledge.
 
@@ -58,6 +64,6 @@ Use `scope=project, project_id=<project>, visibility=shared` for project-level k
 
 - `brain_search` — semantic search over Supabase-backed memories. By default it returns shared/user memories plus private memories owned by the current agent.
 - `brain_remember` — store an explicit durable fact with governance metadata.
-- `brain_profile` — retrieve broader profile/overview memories for the current user/agent view.
+- `brain_profile` — retrieve broader profile/overview memories for the current lobe/agent view.
 
 By default, automatic per-turn sync is disabled. This avoids dumping every chat turn into the brain before governance/review workflows are ready.
