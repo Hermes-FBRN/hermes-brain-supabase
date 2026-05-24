@@ -62,6 +62,8 @@ DEFAULT_LOBE_ID = os.environ.get("SUPABASE_BRAIN_LOBE_ID") or os.environ.get("SU
 DEFAULT_WORKSPACE_ID = DEFAULT_LOBE_ID
 DEFAULT_USER_ID = DEFAULT_LOBE_ID  # legacy name used by Mem0/API filters; semantically lobe/workspace id
 DEFAULT_AGENT_ID = os.environ.get("SUPABASE_BRAIN_AGENT_ID") or "hermes"
+DEFAULT_ALLOWED_LOBES_RAW = os.environ.get("SUPABASE_BRAIN_ALLOWED_LOBES") or DEFAULT_LOBE_ID
+DEFAULT_ALLOWED_LOBES = {x.strip() for x in DEFAULT_ALLOWED_LOBES_RAW.split(",") if x.strip()}
 DEFAULT_SCOPE = os.environ.get("SUPABASE_BRAIN_DEFAULT_SCOPE") or "agent"
 DEFAULT_VISIBILITY = os.environ.get("SUPABASE_BRAIN_DEFAULT_VISIBILITY") or "private"
 ALLOWED_SCOPES = {"shared", "user", "agent", "project"}
@@ -89,6 +91,14 @@ def _text(value: Any) -> Optional[str]:
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _lobe_allowed(lobe_id: str) -> bool:
+    return "*" in DEFAULT_ALLOWED_LOBES or lobe_id in DEFAULT_ALLOWED_LOBES
+
+
+def _deny_lobe(lobe_id: str) -> Dict[str, Any]:
+    return {"ok": False, "error": "lobe_not_allowed", "lobe_id": lobe_id, "agent_id": DEFAULT_AGENT_ID, "allowed_lobes": sorted(DEFAULT_ALLOWED_LOBES)}
 
 
 def _require_db_url() -> str:
@@ -353,6 +363,8 @@ def brain_search(query: str, top_k: int = 5, lobe_id: Optional[str] = None, work
     top_k = max(1, min(int(top_k or 5), 20))
     user_id = lobe_id or workspace_id or user_id or DEFAULT_USER_ID
     agent_id = agent_id or DEFAULT_AGENT_ID
+    if not _lobe_allowed(user_id):
+        return _deny_lobe(user_id)
     filters = {"user_id": user_id}
     for key, value in (("scope", scope), ("visibility", visibility), ("project_id", project_id)):
         if value:
@@ -432,6 +444,8 @@ def brain_text_search(query: str, limit: int = 10, lobe_id: Optional[str] = None
     limit = max(1, min(int(limit or 10), 50))
     user_id = lobe_id or workspace_id or user_id
     agent_id = agent_id or DEFAULT_AGENT_ID
+    if user_id and not _lobe_allowed(user_id):
+        return _deny_lobe(user_id)
     pattern = f"%{query}%"
     clauses = ["coalesce(metadata->>'data','') ilike %s"]
     params: List[Any] = [pattern]
@@ -468,6 +482,8 @@ def brain_profile(lobe_id: Optional[str] = None, workspace_id: Optional[str] = N
     """Return a broad recent/high-importance profile slice for a user."""
     user_id = lobe_id or workspace_id or user_id or DEFAULT_USER_ID
     agent_id = agent_id or DEFAULT_AGENT_ID
+    if not _lobe_allowed(user_id):
+        return _deny_lobe(user_id)
     limit = max(1, min(int(limit or 20), 50))
     clauses = ["metadata->>'user_id' = %s", "(metadata->>'visibility' = 'shared' or metadata->>'scope' in ('shared','user') or coalesce(metadata->>'owner_agent_id', metadata->>'agent_id', metadata->>'created_by_agent', %s) = %s)"]
     params: List[Any] = [user_id, agent_id, agent_id]
@@ -506,6 +522,8 @@ def brain_remember(memory: str, category: str = "general", importance: int = 5, 
     importance = max(0, min(int(importance or 0), 10))
     user_id = lobe_id or workspace_id or user_id or DEFAULT_USER_ID
     agent_id = agent_id or DEFAULT_AGENT_ID
+    if not _lobe_allowed(user_id):
+        return _deny_lobe(user_id)
     metadata = _build_memory_metadata(
         category=category,
         importance=importance,

@@ -47,6 +47,7 @@ SUPABASE_BRAIN_COLLECTION=hermes_brain
 SUPABASE_BRAIN_LOBE_ID=nucleus          # Brain sector/lobe namespace, not a human creator id
 # Aliases still accepted: SUPABASE_BRAIN_WORKSPACE_ID, then legacy SUPABASE_BRAIN_USER_ID
 SUPABASE_BRAIN_AGENT_ID=hermes-main        # main agent id; change per independent main agent
+SUPABASE_BRAIN_ALLOWED_LOBES=nucleus     # comma-separated lobes this deployment may access
 SUPABASE_BRAIN_DEFAULT_SCOPE=agent         # default: private to this agent
 SUPABASE_BRAIN_DEFAULT_VISIBILITY=private  # default: not shown to other agents
 SUPABASE_BRAIN_AUTO_SYNC=false             # recommended
@@ -100,7 +101,7 @@ Search defaults to shared/user memories in the current lobe/workspace plus priva
 
 ## Lobe access policy
 
-Access policy should be enforced by governance/retrieval rules. For the initial `nucleus` lobe, trusted main agents are `hermes-main`, `seraph-main`, and `smith-main`; an unrelated example agent such as `mario-main` should not receive broad `nucleus` access unless explicitly granted.
+Access policy is enforced by the MCP lobe allowlist (`SUPABASE_BRAIN_ALLOWED_LOBES`) and should also be protected operationally by deployment secrets/config. For the initial `nucleus` lobe, trusted main agents are `hermes-main`, `seraph-main`, and `smith-main`; an unrelated example agent such as `mario-main` should not receive broad `nucleus` access unless explicitly granted.
 
 See `LOBE_MIGRATION_PLAN.md` before migrating existing memories.
 

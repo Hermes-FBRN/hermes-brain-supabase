@@ -42,7 +42,7 @@ Explicitly not allowed unless later granted:
 
 - `mario-main`
 
-This access list should eventually be enforced by retrieval/write policy. Until enforcement exists, it is a governance rule and migration guardrail.
+This access list is enforced at the MCP layer with `SUPABASE_BRAIN_ALLOWED_LOBES`; it must also be protected operationally by each deployment’s secrets/config so an unauthorized agent cannot simply set itself to `nucleus`.
 
 ## Canonical metadata for nucleus memories
 
@@ -131,6 +131,7 @@ Preferred:
 
 ```env
 SUPABASE_BRAIN_LOBE_ID=nucleus
+SUPABASE_BRAIN_ALLOWED_LOBES=nucleus
 ```
 
 Accepted alias:

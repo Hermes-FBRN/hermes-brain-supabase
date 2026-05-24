@@ -191,6 +191,7 @@ class SupabaseMem0MemoryProvider(MemoryProvider):
             {"key": "workspace_id", "description": "Alias for lobe_id / Brain workspace namespace", "default": "nucleus", "env_var": "SUPABASE_BRAIN_WORKSPACE_ID"},
             {"key": "user_id", "description": "Legacy alias for lobe_id; prefer SUPABASE_BRAIN_LOBE_ID", "default": "nucleus", "env_var": "SUPABASE_BRAIN_USER_ID"},
             {"key": "agent_id", "description": "Stable ID of this Hermes agent", "default": "hermes", "env_var": "SUPABASE_BRAIN_AGENT_ID"},
+            {"key": "allowed_lobes", "description": "Comma-separated lobes this deployment may access", "default": "nucleus", "env_var": "SUPABASE_BRAIN_ALLOWED_LOBES"},
             {"key": "default_scope", "description": "Default scope for brain_remember", "default": "agent", "choices": ["agent", "shared", "user", "project"]},
             {"key": "default_visibility", "description": "Default visibility for brain_remember", "default": "private", "choices": ["private", "shared", "restricted"]},
             {"key": "auto_sync", "description": "Automatically sync every completed turn", "default": "false", "choices": ["true", "false"]},

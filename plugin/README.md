@@ -17,11 +17,12 @@ SUPABASE_BRAIN_AUTO_SYNC="false"
 SUPABASE_BRAIN_LOBE_ID="nucleus"
 # Aliases still accepted: SUPABASE_BRAIN_WORKSPACE_ID="nucleus", SUPABASE_BRAIN_USER_ID="nucleus"
 SUPABASE_BRAIN_AGENT_ID="hermes"
+SUPABASE_BRAIN_ALLOWED_LOBES="nucleus"
 SUPABASE_BRAIN_DEFAULT_SCOPE="agent"
 SUPABASE_BRAIN_DEFAULT_VISIBILITY="private"
 ```
 
-For multi-agent deployments, keep the same `SUPABASE_BRAIN_COLLECTION`, put agents that should share a memory lobe in the same `SUPABASE_BRAIN_LOBE_ID`, and set a unique `SUPABASE_BRAIN_AGENT_ID` for each independent main agent. Do not use subagent/profile names as main-agent IDs. `SUPABASE_BRAIN_USER_ID` is a legacy alias for the lobe/workspace id, not the human creator.
+For multi-agent deployments, keep the same `SUPABASE_BRAIN_COLLECTION`, put agents that should share a memory lobe in the same `SUPABASE_BRAIN_LOBE_ID`, set `SUPABASE_BRAIN_ALLOWED_LOBES` to the lobes that deployment may access, and set a unique `SUPABASE_BRAIN_AGENT_ID` for each independent main agent. Do not use subagent/profile names as main-agent IDs. `SUPABASE_BRAIN_USER_ID` is a legacy alias for the lobe/workspace id, not the human creator.
 
 ## Governance metadata
 
