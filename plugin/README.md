@@ -17,12 +17,19 @@ SUPABASE_BRAIN_AUTO_SYNC="false"
 SUPABASE_BRAIN_LOBE_ID="nucleus"
 # Deprecated aliases still accepted for old configs: SUPABASE_BRAIN_WORKSPACE_ID="nucleus", SUPABASE_BRAIN_USER_ID="nucleus"
 SUPABASE_BRAIN_AGENT_ID="hermes"
-SUPABASE_BRAIN_ALLOWED_LOBES="nucleus"
+SUPABASE_BRAIN_ADMIN_TOKEN="..."  # trusted direct-DB/control-plane agents only
+SUPABASE_BRAIN_AGENT_TOKEN="..."  # client agents only, for API/MCP proxy mode
+SUPABASE_BRAIN_ALLOWED_LOBES="*"
 SUPABASE_BRAIN_DEFAULT_SCOPE="agent"
 SUPABASE_BRAIN_DEFAULT_VISIBILITY="private"
 ```
 
-For multi-agent deployments, keep the same `SUPABASE_BRAIN_COLLECTION`, put agents that should share a memory lobe in the same `SUPABASE_BRAIN_LOBE_ID`, set `SUPABASE_BRAIN_ALLOWED_LOBES` to the lobes that deployment may access, and set a unique `SUPABASE_BRAIN_AGENT_ID` for each independent main agent. Do not use subagent/profile names as main-agent IDs. `SUPABASE_BRAIN_USER_ID` is a legacy alias for the lobe id, not the human creator.
+For multi-agent deployments, keep the same `SUPABASE_BRAIN_COLLECTION`, put agents that should share a memory lobe in the same `SUPABASE_BRAIN_LOBE_ID`, set a unique `SUPABASE_BRAIN_AGENT_ID` for each independent main agent, and give broad DB/MCP-admin env only to trusted agents. Do not use subagent/profile names as main-agent IDs. `SUPABASE_BRAIN_USER_ID` is a legacy alias for the lobe id, not the human creator.
+
+Security split:
+
+- Trusted agents: direct DB access via `SUPABASE_BRAIN_DB_URL`; optional control-plane MCP admin via `SUPABASE_BRAIN_ADMIN_TOKEN`; `SUPABASE_BRAIN_ALLOWED_LOBES=*` is acceptable.
+- Client agents: no direct DB URL and no admin token. Use a Brain API/MCP proxy with `SUPABASE_BRAIN_AGENT_ID` + `SUPABASE_BRAIN_AGENT_TOKEN`; server-side permissions must come from `public.hermes_agent_auth`.
 
 ## Governance metadata
 

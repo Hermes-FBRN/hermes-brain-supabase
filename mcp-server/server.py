@@ -9,9 +9,11 @@ Design goals:
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
+import secrets
 import sys
 import time
 import traceback
@@ -61,6 +63,7 @@ BRAIN_TABLE = f'{BRAIN_SCHEMA}."{COLLECTION}"'
 DEFAULT_LOBE_ID = os.environ.get("SUPABASE_BRAIN_LOBE_ID") or os.environ.get("SUPABASE_BRAIN_WORKSPACE_ID") or os.environ.get("SUPABASE_BRAIN_USER_ID") or "nucleus"
 DEFAULT_USER_ID = DEFAULT_LOBE_ID  # legacy Mem0 tenant key; semantically lobe_id
 DEFAULT_AGENT_ID = os.environ.get("SUPABASE_BRAIN_AGENT_ID") or "hermes"
+ADMIN_TOKEN = (os.environ.get("SUPABASE_BRAIN_ADMIN_TOKEN") or "").strip()
 DEFAULT_ALLOWED_LOBES_RAW = os.environ.get("SUPABASE_BRAIN_ALLOWED_LOBES") or DEFAULT_LOBE_ID
 DEFAULT_ALLOWED_LOBES = {x.strip() for x in DEFAULT_ALLOWED_LOBES_RAW.split(",") if x.strip()}
 DEFAULT_SCOPE = os.environ.get("SUPABASE_BRAIN_DEFAULT_SCOPE") or "agent"
@@ -94,6 +97,69 @@ def _now_iso() -> str:
 
 def _lobe_allowed(lobe_id: str) -> bool:
     return "*" in DEFAULT_ALLOWED_LOBES or lobe_id in DEFAULT_ALLOWED_LOBES
+
+
+def _is_admin_deployment() -> bool:
+    """Return true only for trusted control-plane deployments.
+
+    Client/tenant agents should not receive SUPABASE_BRAIN_ADMIN_TOKEN. If they
+    can edit their own env they can change local allowlist defaults, but they
+    still cannot call admin MCP tools without this secret being present in the
+    server-side deployment environment.
+    """
+    return bool(ADMIN_TOKEN)
+
+
+def _require_admin(operation: str) -> Optional[Dict[str, Any]]:
+    if _is_admin_deployment():
+        return None
+    return {
+        "ok": False,
+        "error": "admin_token_required",
+        "operation": operation,
+        "agent_id": DEFAULT_AGENT_ID,
+    }
+
+
+def _generate_agent_token(agent_id: str) -> str:
+    safe_agent = re.sub(r"[^A-Za-z0-9_.-]+", "-", agent_id.strip()).strip("-._") or "agent"
+    return f"bat_{safe_agent}_{secrets.token_urlsafe(32)}"
+
+
+def _hash_agent_token(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _listify(value: Optional[Any]) -> List[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        raw = value
+    else:
+        raw = str(value).split(",")
+    return [str(x).strip() for x in raw if str(x).strip()]
+
+
+def _ensure_agent_auth_table(cur) -> None:
+    cur.execute(
+        """
+        create table if not exists public.hermes_agent_auth (
+            agent_id text primary key,
+            token_hash text not null,
+            allowed_lobes text[] not null default '{}',
+            allowed_projects text[] not null default '{}',
+            allowed_sectors text[] not null default '{}',
+            can_read boolean not null default true,
+            can_write boolean not null default false,
+            can_admin boolean not null default false,
+            active boolean not null default true,
+            created_by text,
+            updated_by text,
+            created_at timestamptz not null default now(),
+            updated_at timestamptz not null default now()
+        )
+        """
+    )
 
 
 def _deny_lobe(lobe_id: str) -> Dict[str, Any]:
@@ -355,6 +421,120 @@ def brain_health_check() -> Dict[str, Any]:
 
 
 @mcp.tool()
+def brain_register_agent(agent_id: str, allowed_lobes: Optional[Any] = None, allowed_projects: Optional[Any] = None, allowed_sectors: Optional[Any] = None, can_read: bool = True, can_write: bool = False, can_admin: bool = False, active: bool = True, actor: Optional[str] = None) -> Dict[str, Any]:
+    """Admin-only: create/rotate a limited client-agent token and store its server-side permissions.
+
+    The generated token is returned once. Store it in the client agent env as
+    SUPABASE_BRAIN_AGENT_TOKEN. Never give client agents SUPABASE_BRAIN_DB_URL or
+    SUPABASE_BRAIN_ADMIN_TOKEN.
+    """
+    denial = _require_admin("brain_register_agent")
+    if denial:
+        return denial
+    agent_id = str(agent_id or "").strip()
+    if not agent_id:
+        return {"ok": False, "error": "agent_id_required"}
+    token = _generate_agent_token(agent_id)
+    token_hash = _hash_agent_token(token)
+    lobes = _listify(allowed_lobes)
+    projects = _listify(allowed_projects)
+    sectors = _listify(allowed_sectors)
+    actor = actor or DEFAULT_AGENT_ID
+    with _connect() as conn, conn.cursor() as cur:
+        _ensure_agent_auth_table(cur)
+        cur.execute(
+            """
+            insert into public.hermes_agent_auth (
+                agent_id, token_hash, allowed_lobes, allowed_projects, allowed_sectors,
+                can_read, can_write, can_admin, active, created_by, updated_by
+            ) values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            on conflict (agent_id) do update set
+                token_hash = excluded.token_hash,
+                allowed_lobes = excluded.allowed_lobes,
+                allowed_projects = excluded.allowed_projects,
+                allowed_sectors = excluded.allowed_sectors,
+                can_read = excluded.can_read,
+                can_write = excluded.can_write,
+                can_admin = excluded.can_admin,
+                active = excluded.active,
+                updated_by = excluded.updated_by,
+                updated_at = now()
+            """,
+            (agent_id, token_hash, lobes, projects, sectors, bool(can_read), bool(can_write), bool(can_admin), bool(active), actor, actor),
+        )
+        conn.commit()
+    return {
+        "ok": True,
+        "agent_id": agent_id,
+        "agent_token": token,
+        "token_note": "Shown once. Store as SUPABASE_BRAIN_AGENT_TOKEN in the client agent env; the Brain stores only token_hash.",
+        "permissions": {
+            "allowed_lobes": lobes,
+            "allowed_projects": projects,
+            "allowed_sectors": sectors,
+            "can_read": bool(can_read),
+            "can_write": bool(can_write),
+            "can_admin": bool(can_admin),
+            "active": bool(active),
+        },
+    }
+
+
+@mcp.tool()
+def brain_list_agent_permissions(agent_id: Optional[str] = None) -> Dict[str, Any]:
+    """Admin-only: list client-agent permissions without exposing token hashes."""
+    denial = _require_admin("brain_list_agent_permissions")
+    if denial:
+        return denial
+    clauses: List[str] = []
+    params: List[Any] = []
+    if agent_id:
+        clauses.append("agent_id = %s")
+        params.append(agent_id)
+    where = f"where {' and '.join(clauses)}" if clauses else ""
+    with _connect() as conn, conn.cursor() as cur:
+        _ensure_agent_auth_table(cur)
+        cur.execute(
+            f"""
+            select agent_id, allowed_lobes, allowed_projects, allowed_sectors,
+                   can_read, can_write, can_admin, active, created_by, updated_by,
+                   created_at, updated_at
+            from public.hermes_agent_auth
+            {where}
+            order by agent_id
+            """,
+            params,
+        )
+        rows = cur.fetchall()
+    return {"ok": True, "count": len(rows), "agents": rows}
+
+
+@mcp.tool()
+def brain_revoke_agent(agent_id: str, actor: Optional[str] = None) -> Dict[str, Any]:
+    """Admin-only: deactivate a client-agent token without deleting its audit row."""
+    denial = _require_admin("brain_revoke_agent")
+    if denial:
+        return denial
+    actor = actor or DEFAULT_AGENT_ID
+    with _connect() as conn, conn.cursor() as cur:
+        _ensure_agent_auth_table(cur)
+        cur.execute(
+            """
+            update public.hermes_agent_auth
+            set active = false, updated_by = %s, updated_at = now()
+            where agent_id = %s
+            returning agent_id
+            """,
+            (actor, agent_id),
+        )
+        row = cur.fetchone()
+        conn.commit()
+    if not row:
+        return {"ok": False, "error": "agent_not_found", "agent_id": agent_id}
+    return {"ok": True, "agent_id": agent_id, "active": False}
+
+
+@mcp.tool()
 def brain_search(query: str, top_k: int = 5, lobe_id: Optional[str] = None, workspace_id: Optional[str] = None, user_id: Optional[str] = None, agent_id: Optional[str] = None, scope: Optional[str] = None, visibility: Optional[str] = None, project_id: Optional[str] = None, include_private: bool = False, include_archived: bool = False) -> Dict[str, Any]:
     """Hybrid search the brain: Mem0 semantic candidates + exact text/metadata anchors, reranked for governance terms."""
     top_k = max(1, min(int(top_k or 5), 20))
@@ -549,6 +729,9 @@ def brain_remember(memory: str, category: str = "general", importance: int = 5, 
 @mcp.tool()
 def brain_update_metadata(memory_id: str, category: Optional[str] = None, importance: Optional[int] = None, extra_metadata_json: Optional[str] = None, actor: str = "mcp_brain_manager") -> Dict[str, Any]:
     """Safely update selected metadata fields. Does not edit vector/content."""
+    denial = _require_admin("brain_update_metadata")
+    if denial:
+        return denial
     allowed_extra = {"source", "agent_id", "created_by_agent", "owner_agent_id", "main_agent_id", "subagent_profile_id", "subject_agent_id", "scope", "visibility", "project_id", "user_id", "lobe_id", "created_by_user_id", "created_by_username", "created_by_platform", "note", "tags", "reviewed", "quality", "provenance"}
     with _connect() as conn, conn.cursor() as cur:
         cur.execute(f"select metadata from {BRAIN_TABLE} where id = %s for update", (memory_id,))
@@ -577,6 +760,9 @@ def brain_update_metadata(memory_id: str, category: Optional[str] = None, import
 @mcp.tool()
 def brain_archive_memory(memory_id: str, reason: str = "archived via MCP brain-manager", actor: str = "mcp_brain_manager") -> Dict[str, Any]:
     """Soft-archive a memory. This never hard-deletes the row."""
+    denial = _require_admin("brain_archive_memory")
+    if denial:
+        return denial
     with _connect() as conn, conn.cursor() as cur:
         cur.execute(f"select metadata from {BRAIN_TABLE} where id = %s for update", (memory_id,))
         row = cur.fetchone()
@@ -594,6 +780,9 @@ def brain_archive_memory(memory_id: str, reason: str = "archived via MCP brain-m
 @mcp.tool()
 def brain_quality_report(user_id: Optional[str] = None, include_archived: bool = False) -> Dict[str, Any]:
     """Return memory quality/admin metrics: counts, categories, missing fields, stale rows."""
+    denial = _require_admin("brain_quality_report")
+    if denial:
+        return denial
     clauses: List[str] = []
     params: List[Any] = []
     if user_id:
@@ -633,6 +822,9 @@ def brain_quality_report(user_id: Optional[str] = None, include_archived: bool =
 @mcp.tool()
 def brain_find_duplicates(user_id: Optional[str] = None, threshold: float = 0.35, limit: int = 20) -> Dict[str, Any]:
     """Find likely duplicate memories using pgvector cosine distance. Lower distance = more similar."""
+    denial = _require_admin("brain_find_duplicates")
+    if denial:
+        return denial
     limit = max(1, min(int(limit or 20), 100))
     threshold = max(0.0, min(float(threshold), 2.0))
     clauses = ["a.id < b.id", "(a.vec <=> b.vec) <= %s"]

@@ -30,6 +30,7 @@ Serve anche l'accesso agli stessi secret del Brain:
 ```env
 SUPABASE_BRAIN_DB_URL=postgresql://...
 OPENAI_API_KEY=...
+SUPABASE_BRAIN_ADMIN_TOKEN=...  # solo trusted main agents
 ```
 
 Non committare mai questi valori nel repo.
@@ -68,7 +69,8 @@ SUPABASE_BRAIN_LOBE_ID=nucleus
 # SUPABASE_BRAIN_WORKSPACE_ID=nucleus
 # SUPABASE_BRAIN_USER_ID=nucleus
 SUPABASE_BRAIN_AGENT_ID=<new-main-agent-id>
-SUPABASE_BRAIN_ALLOWED_LOBES=nucleus
+SUPABASE_BRAIN_ADMIN_TOKEN=...
+SUPABASE_BRAIN_ALLOWED_LOBES=*
 SUPABASE_BRAIN_DEFAULT_SCOPE=agent
 SUPABASE_BRAIN_DEFAULT_VISIBILITY=private
 SUPABASE_BRAIN_AUTO_SYNC=false
@@ -81,6 +83,35 @@ SUPABASE_BRAIN_AGENT_ID=research-main
 ```
 
 Nota: `SUPABASE_BRAIN_LOBE_ID` è il namespace/lobo del Brain, non l’utente umano creatore. Per tracciare l’attore umano usa metadata come `created_by_user_id`, `created_by_username` e `created_by_platform` quando disponibili.
+
+Per agenti **client/non trusted** non usare questa configurazione diretta: non dare `SUPABASE_BRAIN_DB_URL` né `SUPABASE_BRAIN_ADMIN_TOKEN`. Usa invece un Brain API/MCP proxy e configura solo `SUPABASE_BRAIN_AGENT_ID`, `SUPABASE_BRAIN_AGENT_TOKEN` e l'URL del proxy.
+
+## 3b. Provisioning futuro di un client agent
+
+Da un trusted main agent con MCP `brain-manager` admin attivo, registra il client agent con:
+
+```json
+{
+  "agent_id": "client-alpha-agent",
+  "allowed_lobes": ["client-alpha"],
+  "allowed_projects": ["client-alpha-project"],
+  "can_read": true,
+  "can_write": true,
+  "can_admin": false,
+  "active": true
+}
+```
+
+Il tool `brain_register_agent` restituisce un `agent_token` una sola volta. Nel client agent metti:
+
+```env
+SUPABASE_BRAIN_AGENT_ID=client-alpha-agent
+SUPABASE_BRAIN_AGENT_TOKEN=...
+SUPABASE_BRAIN_API_URL=https://brain.example/api
+SUPABASE_BRAIN_AUTO_SYNC=false
+```
+
+Il token viene salvato nel Brain solo come hash in `public.hermes_agent_auth`; per ruotarlo richiama `brain_register_agent`, per revocarlo usa `brain_revoke_agent`.
 
 ## 4. Installa plugin e MCP
 

@@ -47,7 +47,8 @@ SUPABASE_BRAIN_COLLECTION=hermes_brain
 SUPABASE_BRAIN_LOBE_ID=nucleus          # Brain sector/lobe namespace, not a human creator id
 # Deprecated aliases still accepted for old configs: SUPABASE_BRAIN_WORKSPACE_ID, then legacy SUPABASE_BRAIN_USER_ID
 SUPABASE_BRAIN_AGENT_ID=hermes-main        # main agent id; change per independent main agent
-SUPABASE_BRAIN_ALLOWED_LOBES=nucleus     # comma-separated lobes this deployment may access
+SUPABASE_BRAIN_ADMIN_TOKEN=...             # only for trusted direct-DB control-plane agents
+SUPABASE_BRAIN_ALLOWED_LOBES=*             # trusted direct-DB deployments only; client agents use server-side permissions
 SUPABASE_BRAIN_DEFAULT_SCOPE=agent         # default: private to this agent
 SUPABASE_BRAIN_DEFAULT_VISIBILITY=private  # default: not shown to other agents
 SUPABASE_BRAIN_AUTO_SYNC=false             # recommended
@@ -100,7 +101,16 @@ Search defaults to shared/user memories in the current lobe plus private memorie
 
 ## Lobe access policy
 
-Access policy is enforced by the MCP lobe allowlist (`SUPABASE_BRAIN_ALLOWED_LOBES`) and should also be protected operationally by deployment secrets/config. For the initial `nucleus` lobe, trusted main agents are `hermes-main`, `seraph-main`, and `smith-main`; an unrelated example agent such as `mario-main` should not receive broad `nucleus` access unless explicitly granted.
+Use two access tiers:
+
+- **Trusted main agents** (`hermes-main`, `seraph-main`, `smith-main`): may receive `SUPABASE_BRAIN_DB_URL`, `OPENAI_API_KEY`, `SUPABASE_BRAIN_ADMIN_TOKEN`, and broad `SUPABASE_BRAIN_ALLOWED_LOBES=*`.
+- **Client / tenant agents**: must not receive `SUPABASE_BRAIN_DB_URL` or `SUPABASE_BRAIN_ADMIN_TOKEN`; they should access the Brain only through a Brain API/MCP proxy using `SUPABASE_BRAIN_AGENT_ID` + `SUPABASE_BRAIN_AGENT_TOKEN`.
+
+`SUPABASE_BRAIN_ALLOWED_LOBES` is a trusted direct-DB deployment guard, not an authoritative tenant security boundary. If an untrusted agent can edit its own env, server-side permissions in `public.hermes_agent_auth` must decide which lobes/projects/sectors it can access.
+
+Admin-only MCP tools are available only when `SUPABASE_BRAIN_ADMIN_TOKEN` is configured: `brain_register_agent`, `brain_list_agent_permissions`, `brain_revoke_agent`, plus metadata/archive/quality/dedup administration.
+
+To provision a client agent token from a trusted main agent, call `brain_register_agent` with the target `agent_id` and allowed lobes/projects/sectors. It returns `agent_token` once; store that in the client deployment as `SUPABASE_BRAIN_AGENT_TOKEN`. The Brain stores only a hash.
 
 See `LOBE_MIGRATION_PLAN.md` before migrating existing memories.
 
