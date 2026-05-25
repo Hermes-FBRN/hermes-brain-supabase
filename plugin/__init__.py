@@ -216,15 +216,19 @@ class SupabaseMem0MemoryProvider(MemoryProvider):
         cfg = _load_json_config()
         self._db_url = os.environ.get("SUPABASE_BRAIN_DB_URL", "")
         self._collection = os.environ.get("SUPABASE_BRAIN_COLLECTION") or cfg.get("collection") or "hermes_brain"
+        # Resolve the Brain namespace from explicit lobe/workspace configuration only.
+        # Gateway/platform kwargs may include a human/platform ``user_id`` (for example
+        # a Discord user snowflake). That value must never become a new Brain lobe by
+        # accident; ``user_id`` is only kept below as an explicit env/config legacy
+        # fallback for older deployments.
         self._user_id = (
             kwargs.get("lobe_id")
-            or kwargs.get("workspace_id")
-            or kwargs.get("user_id")
             or os.environ.get("SUPABASE_BRAIN_LOBE_ID")
-            or os.environ.get("SUPABASE_BRAIN_WORKSPACE_ID")
-            or os.environ.get("SUPABASE_BRAIN_USER_ID")
             or cfg.get("lobe_id")
+            or kwargs.get("workspace_id")
+            or os.environ.get("SUPABASE_BRAIN_WORKSPACE_ID")
             or cfg.get("workspace_id")
+            or os.environ.get("SUPABASE_BRAIN_USER_ID")
             or cfg.get("user_id")
             or "nucleus"
         )

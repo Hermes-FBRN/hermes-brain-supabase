@@ -1,6 +1,7 @@
 import importlib.util
 import os
 import sys
+import tempfile
 import types
 from pathlib import Path
 
@@ -9,6 +10,7 @@ def load_server(monkeypatch, **env):
     for key in list(os.environ):
         if key.startswith("SUPABASE_BRAIN_"):
             monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("HERMES_HOME", tempfile.mkdtemp(prefix="brain-auth-test-"))
     for key, value in env.items():
         monkeypatch.setenv(key, value)
 
