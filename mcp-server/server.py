@@ -160,6 +160,13 @@ def _ensure_agent_auth_table(cur) -> None:
         )
         """
     )
+    # Keep the auth registry out of Supabase's public PostgREST surface.
+    # Trusted direct-DB agents connect as postgres; service_role remains available
+    # for controlled server-side API use. Client/tenant agents must go through
+    # the Brain API/MCP proxy, never direct table access.
+    cur.execute("alter table public.hermes_agent_auth enable row level security")
+    cur.execute("revoke all on table public.hermes_agent_auth from anon, authenticated")
+    cur.execute("grant all on table public.hermes_agent_auth to service_role")
 
 
 def _deny_lobe(lobe_id: str) -> Dict[str, Any]:
