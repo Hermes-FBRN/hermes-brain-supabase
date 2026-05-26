@@ -32,7 +32,7 @@ hermes config set memory.provider supabase_mem0
 ## Required env vars
 
 ```env
-SUPABASE_BRAIN_DB_URL=postgresql://postgres.xxxx:***@aws-0-eu-central-1.pooler.supabase.com:5432/postgres?sslmode=require
+SUPABASE_BRAIN_DB_URL=postgresql://<user>:<password>@<your-pooler>.pooler.supabase.com:5432/postgres?sslmode=require
 OPENAI_API_KEY=sk-...
 ```
 
